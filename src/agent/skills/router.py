@@ -28,8 +28,11 @@ class SkillRouter:
     def select_skills(
         self,
         ctx: AgentContext,
-        max_count: int = 3,
+        max_count: Optional[int] = None,
     ) -> List[str]:
+        # Get max_count from config if not explicitly provided
+        if max_count is None:
+            max_count = self._get_max_skill_count()
         requested_skills = ctx.meta.get("skills_requested") or ctx.meta.get("strategies_requested", [])
         if requested_skills:
             logger.info("[SkillRouter] user-requested skills: %s", requested_skills)
@@ -67,9 +70,11 @@ class SkillRouter:
     def select_strategies(
         self,
         ctx: AgentContext,
-        max_count: int = 3,
+        max_count: Optional[int] = None,
     ) -> List[str]:
         """Compatibility wrapper for legacy strategy-based callers."""
+        if max_count is None:
+            max_count = self._get_max_skill_count()
         return self.select_skills(ctx, max_count=max_count)
 
     def _detect_regime(self, ctx: AgentContext) -> Optional[str]:
@@ -108,6 +113,17 @@ class SkillRouter:
         except Exception:
             logger.warning("Failed to get routing mode, falling back to auto", exc_info=True)
             return "auto"
+
+    @staticmethod
+    def _get_max_skill_count() -> int:
+        try:
+            from src.config import get_config
+
+            config = get_config()
+            return getattr(config, "agent_skill_max_count", 3)
+        except Exception:
+            logger.warning("Failed to get max skill count, falling back to 3", exc_info=True)
+            return 3
 
     @staticmethod
     def _get_available_ids() -> set:

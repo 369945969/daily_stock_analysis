@@ -104,6 +104,29 @@ if [ -f "$REQ_FILE" ]; then
   fi
 fi
 
+# 编译前端
+WEB_DIR="$ROOT_DIR/apps/dsa-web"
+if [ -d "$WEB_DIR" ]; then
+  if command -v npm >/dev/null 2>&1; then
+    echo "正在编译前端..."
+    cd "$WEB_DIR"
+    if ! npm install >/dev/null 2>&1; then
+      echo "npm install 失败，跳过前端编译" >&2
+    else
+      if ! npm run build >/dev/null 2>&1; then
+        echo "npm run build 失败，跳过前端编译" >&2
+      else
+        echo "前端编译成功"
+      fi
+    fi
+    cd "$ROOT_DIR"
+  else
+    echo "npm 未安装，跳过前端编译" >&2
+  fi
+else
+  echo "前端目录不存在: $WEB_DIR" >&2
+fi
+
 MODE="${DSA_MODE:-serve-only}"
 
 CMD=("$PYTHON" "-u" "main.py")
@@ -119,7 +142,9 @@ case "$MODE" in
     ;;
 esac
 CMD+=("--host" "$HOST" "--port" "$PORT")
-CMD+=("${ARGS[@]}")
+if [ ${#ARGS[@]} -gt 0 ]; then
+  CMD+=("${ARGS[@]}")
+fi
 
 nohup env PYTHONNOUSERSITE=1 "${CMD[@]}" >"$LOG_FILE" 2>&1 &
 new_pid="$!"

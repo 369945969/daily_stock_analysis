@@ -717,6 +717,7 @@ class Config:
     agent_memory_enabled: bool = False  # Enable memory & calibration system
     agent_skill_autoweight: bool = True  # Auto-weight skills by backtest performance
     agent_skill_routing: str = "auto"  # Skill routing: 'auto' (regime-based) or 'manual'
+    agent_skill_max_count: int = 5 # Maximum number of skills/strategies to select (default: 3)
     agent_context_compression_enabled: bool = False  # Compress visible chat history before Agent calls
     agent_context_compression_profile: str = AGENT_CONTEXT_COMPRESSION_DEFAULT_PROFILE
     agent_context_compression_trigger_tokens: int = 12000
@@ -1511,6 +1512,12 @@ class Config:
                 os.getenv('AGENT_SKILL_ROUTING')
                 or os.getenv('AGENT_STRATEGY_ROUTING', 'auto')
             ).lower(),
+            agent_skill_max_count=parse_env_int(
+                os.getenv('AGENT_SKILL_MAX_COUNT'),
+                3,
+                field_name='AGENT_SKILL_MAX_COUNT',
+                minimum=1,
+            ),
             agent_context_compression_enabled=parse_env_bool(
                 os.getenv('AGENT_CONTEXT_COMPRESSION_ENABLED'),
                 default=False,

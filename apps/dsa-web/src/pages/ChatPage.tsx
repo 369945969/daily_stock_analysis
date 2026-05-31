@@ -36,8 +36,9 @@ const QUICK_QUESTIONS = [
   { label: '用情绪周期分析东方财富', skill: 'emotion_cycle' },
 ];
 
-const MAX_SELECTED_SKILLS = 3;
+const DEFAULT_MAX_SELECTED_SKILLS = 3;
 const CONTEXT_COMPRESSION_CONFIG_KEY = 'AGENT_CONTEXT_COMPRESSION_ENABLED';
+const AGENT_SKILL_MAX_COUNT_KEY = 'AGENT_SKILL_MAX_COUNT';
 
 const getMessageSkillNames = (msg: Message): string[] => {
   if (msg.skillNames?.length) return msg.skillNames;
@@ -72,6 +73,7 @@ const ChatPage: React.FC = () => {
   const [contextCompressionError, setContextCompressionError] = useState<string | null>(null);
   const [copiedMessages, setCopiedMessages] = useState<Set<string>>(new Set());
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const [maxSelectedSkills, setMaxSelectedSkills] = useState<number>(DEFAULT_MAX_SELECTED_SKILLS);
   const copyResetTimerRef = useRef<Partial<Record<string, number>>>({});
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -211,6 +213,12 @@ const ChatPage: React.FC = () => {
         }
         const enabledItem = config.items.find((item) => item.key === CONTEXT_COMPRESSION_CONFIG_KEY);
         setContextCompressionEnabled(String(enabledItem?.value ?? '').trim().toLowerCase() === 'true');
+        
+        // 获取 AGENT_SKILL_MAX_COUNT 配置
+        const maxCountItem = config.items.find((item) => item.key === AGENT_SKILL_MAX_COUNT_KEY);
+        const maxCountValue = maxCountItem?.value ? parseInt(maxCountItem.value, 10) : DEFAULT_MAX_SELECTED_SKILLS;
+        setMaxSelectedSkills(isNaN(maxCountValue) ? DEFAULT_MAX_SELECTED_SKILLS : maxCountValue);
+        
         setContextCompressionConfigVersion(config.configVersion);
         setContextCompressionMaskToken(config.maskToken || '******');
         setContextCompressionLoaded(true);
@@ -275,7 +283,7 @@ const ChatPage: React.FC = () => {
   const availableSkillIds = new Set(skills.map((skill) => skill.id));
   const quickQuestions = QUICK_QUESTIONS.filter((question) => availableSkillIds.size === 0 || availableSkillIds.has(question.skill));
   const selectedSkillIdSet = new Set(selectedSkillIds);
-  const skillLimitReached = selectedSkillIds.length >= MAX_SELECTED_SKILLS;
+  const skillLimitReached = selectedSkillIds.length >= maxSelectedSkills;
 
   const getSkillNames = useCallback(
     (skillIds: string[]) => skillIds.map((id) => skills.find((s) => s.id === id)?.name || id),
@@ -290,20 +298,20 @@ const ChatPage: React.FC = () => {
         normalized.push(cleaned);
       }
     }
-    return normalized.slice(0, MAX_SELECTED_SKILLS);
-  }, []);
+    return normalized.slice(0, maxSelectedSkills);
+  }, [maxSelectedSkills]);
 
   const toggleSkillSelection = useCallback((skillId: string) => {
     setSelectedSkillIds((prev) => {
       if (prev.includes(skillId)) {
         return prev.filter((id) => id !== skillId);
       }
-      if (prev.length >= MAX_SELECTED_SKILLS) {
+      if (prev.length >= maxSelectedSkills) {
         return prev;
       }
       return [...prev, skillId];
     });
-  }, []);
+  }, [maxSelectedSkills]);
 
   const handleStartNewChat = useCallback(() => {
     followUpContextRef.current = null;

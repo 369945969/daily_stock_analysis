@@ -94,27 +94,29 @@ const CNStockListPage: React.FC = () => {
   const tabItems: TabKey[] = ['all', 'sh', 'sz', 'star'];
 
   return (
-    <div className="cn-stock-list-page min-h-screen space-y-4 p-4 md:p-6">
-      <PageHeader
-        eyebrow="Stock Index"
-        title="列表"
-        description="按大盘标签浏览 A 股全量股票，支持代码 / 名称 / 拼音搜索。"
-        actions={(
-          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-            <div className="w-full sm:w-[320px]">
-              <Input
-                value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setCurrentPage(1);
-                }}
-                placeholder="搜索：600519 / 贵州茅台 / gzmt"
-                aria-label="搜索 A股 股票"
-              />
+    <div className="cn-stock-list-page min-h-screen space-y-4 px-4 pb-4 pt-4 md:px-6 md:pb-6 md:pt-4">
+      <div className="sticky top-4 z-30">
+        <PageHeader
+          eyebrow="Stock Index"
+          title="列表"
+          description="按大盘标签浏览 A 股全量股票，支持代码 / 名称 / 拼音搜索。"
+          actions={(
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+              <div className="w-full sm:w-[320px]">
+                <Input
+                  value={query}
+                  onChange={(event) => {
+                    setQuery(event.target.value);
+                    setCurrentPage(1);
+                  }}
+                  placeholder="搜索：600519 / 贵州茅台 / gzmt"
+                  aria-label="搜索 A股 股票"
+                />
+              </div>
             </div>
-          </div>
-        )}
-      />
+          )}
+        />
+      </div>
 
       {error ? (
         <InlineAlert

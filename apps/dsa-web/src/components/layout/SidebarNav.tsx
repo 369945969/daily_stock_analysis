@@ -39,8 +39,8 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
   return (
-    <div className="flex h-full flex-col">
-      <div className={cn('mb-4 flex items-center px-1', collapsed ? 'justify-center' : '')}>
+    <div className="flex h-full w-full flex-col">
+      <div className={cn('mb-4 flex w-full items-center px-1', collapsed ? 'justify-center' : '')}>
         {!collapsed ? (
           <p className="w-full rounded-xl px-2 py-1.5 text-center text-[15px] font-semibold tracking-wide text-foreground">
             股票分析师
@@ -48,7 +48,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
         ) : null}
       </div>
 
-      <nav className="flex flex-1 flex-col gap-1.5" aria-label="主导航">
+      <nav className="flex w-full flex-1 flex-col gap-1.5" aria-label="主导航">
         {NAV_ITEMS.map(({ key, label, to, icon: Icon, exact, badge }) => (
           <NavLink
             key={key}
@@ -58,7 +58,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
             aria-label={label}
             className={({ isActive }) =>
               cn(
-                'group relative flex items-center gap-3 border-y border-x-0 text-sm transition-all',
+                'group relative flex w-full items-center gap-3 border-y border-x-0 text-sm transition-all',
                 'h-[var(--nav-item-height)]',
                 collapsed ? 'justify-center px-0' : 'px-[var(--nav-item-padding-x)]',
                 isActive

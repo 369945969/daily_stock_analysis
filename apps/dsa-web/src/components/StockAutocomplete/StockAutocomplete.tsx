@@ -5,14 +5,17 @@
  * Supports keyboard navigation, IME input method, graceful degradation
  */
 
-import { Component, useRef, useEffect, useState } from 'react';
+import { Component, useMemo, useRef, useEffect, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useStockIndex } from '../../hooks/useStockIndex';
 import { useAutocomplete } from '../../hooks/useAutocomplete';
+import { searchStocks } from '../../utils/searchStocks';
 import { SuggestionsList } from './SuggestionsList';
 import { cn } from '../../utils/cn';
+import type { StockIndexItem, StockSuggestion } from '../../types/stockIndex';
+import { Badge } from '../common';
 
 const AUTOCOMPLETE_INPUT_CLASS =
   'input-surface input-focus-glow h-11 w-full rounded-xl border bg-transparent px-4 text-sm transition-all focus:outline-none disabled:cursor-not-allowed disabled:opacity-60';
@@ -30,6 +33,7 @@ export interface StockAutocompleteProps {
   placeholder?: string;
   /** Additional CSS class name */
   className?: string;
+  mode?: 'autocomplete' | 'dropdown';
 }
 
 function FallbackInput({
@@ -98,8 +102,15 @@ function StockAutocompleteInner({
   disabled = false,
   placeholder = '输入股票代码或名称',
   className,
+  mode = 'autocomplete',
 }: StockAutocompleteProps) {
   const { index, loading, fallback } = useStockIndex();
+  const isDropdownMode = mode === 'dropdown';
+  const filteredIndex = useMemo(() => {
+    if (!isDropdownMode) return index;
+    return index.filter((item) => item.active && item.market === 'CN' && item.assetType === 'stock');
+  }, [index, isDropdownMode]);
+
   const {
     // query,
     setQuery,
@@ -115,11 +126,16 @@ function StockAutocompleteInner({
     setIsComposing,
     runtimeFallback,
     error: autocompleteError,
-  } = useAutocomplete(index);
+  } = useAutocomplete(filteredIndex, {
+    minLength: isDropdownMode ? 9999 : undefined,
+  });
 
   const inputRef = useRef<HTMLInputElement>(null);
   const prevValueRef = useRef(value);
   const [dropdownStyle, setDropdownStyle] = useState<{ top: number; left: number; width: string } | null>(null);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [dropdownHighlightedIndex, setDropdownHighlightedIndex] = useState<number>(-1);
+  const [activeTab, setActiveTab] = useState<'all' | 'sh' | 'sz' | 'star'>('all');
 
   const updateDropdownPosition = () => {
     if (!inputRef.current) {
@@ -136,21 +152,98 @@ function StockAutocompleteInner({
   };
 
   const closeSuggestions = () => {
-    close();
+    if (!isDropdownMode) {
+      close();
+    }
+    setDropdownOpen(false);
     setDropdownStyle(null);
+    setDropdownHighlightedIndex(-1);
   };
 
   // Sync external value with internal query (only when value truly changes)
   useEffect(() => {
+    if (isDropdownMode) {
+      prevValueRef.current = value;
+      return;
+    }
     if (prevValueRef.current !== value) {
       setQuery(value);
       prevValueRef.current = value;
     }
-  }, [value, setQuery]);
+  }, [value, setQuery, isDropdownMode]);
+
+  const classifyAStock = (item: StockIndexItem): 'sh' | 'sz' | 'star' | null => {
+    const canonical = item.canonicalCode.toUpperCase();
+    const code = item.displayCode;
+    const isSH = canonical.endsWith('.SH');
+    const isSZ = canonical.endsWith('.SZ');
+    const isStar = isSH && (code.startsWith('688') || code.startsWith('689'));
+    if (isStar) return 'star';
+    if (isSH) return 'sh';
+    if (isSZ) return 'sz';
+    return null;
+  };
+
+  const tabCounts = useMemo(() => {
+    const counts = { all: 0, sh: 0, sz: 0, star: 0 };
+    if (!isDropdownMode) {
+      return counts;
+    }
+    for (const item of filteredIndex) {
+      counts.all += 1;
+      const cls = classifyAStock(item);
+      if (cls) counts[cls] += 1;
+    }
+    return counts;
+  }, [filteredIndex, isDropdownMode]);
+
+  const dropdownSuggestions: StockSuggestion[] = useMemo(() => {
+    if (!isDropdownMode) {
+      return suggestions;
+    }
+
+    const trimmed = value.trim();
+    if (trimmed) return [];
+
+    const base = activeTab === 'all'
+      ? filteredIndex
+      : filteredIndex.filter((item) => classifyAStock(item) === activeTab);
+
+    const sorted = [...base].sort((a, b) => {
+      const aNum = Number.parseInt(a.displayCode, 10);
+      const bNum = Number.parseInt(b.displayCode, 10);
+      const aIsNum = Number.isFinite(aNum);
+      const bIsNum = Number.isFinite(bNum);
+      if (aIsNum && bIsNum) return aNum - bNum;
+      return a.displayCode.localeCompare(b.displayCode, 'zh-CN');
+    });
+
+    return sorted.slice(0, 120).map((item) => ({
+      canonicalCode: item.canonicalCode,
+      displayCode: item.displayCode,
+      nameZh: item.nameZh,
+      market: item.market,
+      matchType: 'fuzzy',
+      matchField: 'name',
+      score: 1,
+    }));
+  }, [activeTab, filteredIndex, isDropdownMode, suggestions, value]);
+
+  const searchSuggestions: StockSuggestion[] = useMemo(() => {
+    if (!isDropdownMode) return suggestions;
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return dropdownSuggestions;
+    return searchStocks(trimmed, filteredIndex, { limit: 30, activeOnly: true });
+  }, [dropdownSuggestions, filteredIndex, isDropdownMode, suggestions, value]);
+
+  const effectiveSuggestions = isDropdownMode ? searchSuggestions : suggestions;
+  const effectiveIsOpen = isDropdownMode ? dropdownOpen : isOpen;
+  const effectiveHighlightedIndex = isDropdownMode ? dropdownHighlightedIndex : highlightedIndex;
+  const effectiveSetHighlightedIndex = isDropdownMode ? setDropdownHighlightedIndex : setHighlightedIndex;
 
   // Calculate suggestion box position (using fixed positioning)
   useEffect(() => {
-    if (!isOpen) {
+    if (!effectiveIsOpen) {
       return;
     }
 
@@ -163,7 +256,7 @@ function StockAutocompleteInner({
       window.removeEventListener('resize', updateDropdownPosition);
       window.removeEventListener('scroll', updateDropdownPosition, true);
     };
-  }, [isOpen]);
+  }, [effectiveIsOpen]);
 
   useEffect(() => {
     if (!autocompleteError) {
@@ -181,17 +274,33 @@ function StockAutocompleteInner({
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
-        highlightNext();
+        if (isDropdownMode) {
+          setDropdownHighlightedIndex((prev) => {
+            if (effectiveSuggestions.length === 0) return -1;
+            if (prev >= effectiveSuggestions.length - 1) return 0;
+            return prev + 1;
+          });
+        } else {
+          highlightNext();
+        }
         break;
       case 'ArrowUp':
         e.preventDefault();
-        highlightPrevious();
+        if (isDropdownMode) {
+          setDropdownHighlightedIndex((prev) => {
+            if (effectiveSuggestions.length === 0) return -1;
+            if (prev <= 0) return effectiveSuggestions.length - 1;
+            return prev - 1;
+          });
+        } else {
+          highlightPrevious();
+        }
         break;
       case 'Enter':
         e.preventDefault();
-        if (highlightedIndex >= 0 && suggestions[highlightedIndex]) {
+        if (effectiveHighlightedIndex >= 0 && effectiveSuggestions[effectiveHighlightedIndex]) {
           // Select highlighted item
-          const selected = suggestions[highlightedIndex];
+          const selected = effectiveSuggestions[effectiveHighlightedIndex];
           onChange(selected.displayCode);
           closeSuggestions();
           onSubmit(selected.canonicalCode, selected.nameZh, 'autocomplete');
@@ -246,21 +355,25 @@ function StockAutocompleteInner({
         onCompositionStart={handleCompositionStart}
         onCompositionEnd={handleCompositionEnd}
         onFocus={() => {
-          if (isOpen) {
+          if (isDropdownMode) {
+            setDropdownOpen(true);
+            setDropdownHighlightedIndex(-1);
             updateDropdownPosition();
+            return;
           }
+          if (isOpen) updateDropdownPosition();
         }}
         onBlur={handleBlur}
         placeholder={placeholder}
         disabled={disabled}
         className={cn(
           AUTOCOMPLETE_INPUT_CLASS,
-          isOpen && "rounded-b-none",
+          effectiveIsOpen && "rounded-b-none",
           className
         )}
         aria-autocomplete="none"
         role="combobox"
-        aria-expanded={isOpen}
+        aria-expanded={effectiveIsOpen}
         aria-haspopup="listbox"
         aria-controls="suggestions-list"
       />
@@ -273,21 +386,55 @@ function StockAutocompleteInner({
       )}
 
       {/* Suggestion dropdown list */}
-      {isOpen && dropdownStyle && createPortal(
-        <SuggestionsList
-          suggestions={suggestions}
-          highlightedIndex={highlightedIndex}
-          onSelect={(s) => {
-            // Update external value (shown in input box)
-            onChange(s.displayCode);
-            // Close dropdown list
-            closeSuggestions();
-            // Submit analysis
-            onSubmit(s.canonicalCode, s.nameZh, 'autocomplete');
-          }}
-          onMouseEnter={(index) => setHighlightedIndex(index)}
-          style={{ position: 'fixed', ...dropdownStyle }}
-        />,
+      {effectiveIsOpen && dropdownStyle && createPortal(
+        <div style={{ position: 'fixed', ...dropdownStyle }} className="z-[100]">
+          {isDropdownMode ? (
+            <div
+              className="rounded-t-lg border-x border-t border-[var(--border-accent)]"
+              style={{ backgroundColor: 'hsl(var(--card) / 0.85)' }}
+            >
+              <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+                {(['all', 'sh', 'sz', 'star'] as const).map((tab) => {
+                  const label = tab === 'all' ? '全部' : tab === 'sh' ? '上证' : tab === 'sz' ? '深证' : '科创';
+                  const isActive = tab === activeTab;
+                  return (
+                    <button
+                      key={tab}
+                      type="button"
+                      className={cn(
+                        'inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all',
+                        isActive
+                          ? 'border-cyan/30 bg-cyan/10 text-cyan'
+                          : 'border-border/60 bg-elevated/30 text-secondary-text hover:bg-hover hover:text-foreground'
+                      )}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        setActiveTab(tab);
+                        setDropdownHighlightedIndex(-1);
+                        updateDropdownPosition();
+                      }}
+                    >
+                      <span>{label}</span>
+                      <Badge variant="default" size="sm" className={cn(isActive ? 'border-cyan/30 bg-cyan/12 text-cyan shadow-none' : 'shadow-none')}>
+                        {tabCounts[tab]}
+                      </Badge>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+          <SuggestionsList
+            suggestions={effectiveSuggestions}
+            highlightedIndex={effectiveHighlightedIndex}
+            onSelect={(s) => {
+              onChange(s.displayCode);
+              closeSuggestions();
+              onSubmit(s.canonicalCode, s.nameZh, 'autocomplete');
+            }}
+            onMouseEnter={(index) => effectiveSetHighlightedIndex(index)}
+          />
+        </div>,
         document.body
       )}
     </div>

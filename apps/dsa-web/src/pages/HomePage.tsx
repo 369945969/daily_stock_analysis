@@ -546,7 +546,7 @@ const HomePage: React.FC = () => {
       className="flex h-[calc(100vh-5rem)] w-full flex-col overflow-hidden md:flex-row sm:h-[calc(100vh-5.5rem)] lg:h-[calc(100vh-2rem)]"
     >
       <div className="flex-1 flex min-h-0 min-w-0 w-full overflow-hidden">
-        <div className="hidden min-h-0 w-64 shrink-0 flex-col overflow-hidden px-4 pb-4 pt-2 md:flex lg:w-72">
+        <div className="hidden min-h-0 w-64 shrink-0 flex-col overflow-hidden px-4 pb-4 pt-3 md:flex lg:w-72 md:pt-4">
           {sidebarContent}
         </div>
 

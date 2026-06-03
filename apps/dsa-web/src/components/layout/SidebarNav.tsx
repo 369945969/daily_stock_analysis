@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { BarChart3, Bell, BriefcaseBusiness, Home, LogOut, MessageSquareQuote, Search, Settings2 } from 'lucide-react';
+import { BarChart3, Bell, BriefcaseBusiness, Home, List, LogOut, MessageSquareQuote, Settings2 } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { ALPHASIFT_CONFIG_CHANGED_EVENT, SYSTEM_CONFIG_CHANGED_EVENT, alphasiftApi } from '../../api/alphasift';
 import { useAuth } from '../../contexts/AuthContext';
@@ -26,6 +27,7 @@ type NavItem = {
 
 const NAV_ITEMS: NavItem[] = [
   { key: 'home', label: '首页', to: '/', icon: Home, exact: true },
+  { key: 'cn-stocks', label: '列表', to: '/cn-stocks', icon: List },
   { key: 'chat', label: '问股', to: '/chat', icon: MessageSquareQuote, badge: 'completion' },
   { key: 'screening', label: '选股', to: '/screening', icon: Search },
   { key: 'portfolio', label: '持仓', to: '/portfolio', icon: BriefcaseBusiness },
@@ -70,18 +72,19 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
   const navItems = showAlphaSiftNav ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.key !== 'screening');
 
   return (
-    <div className="flex h-full flex-col">
-      <div className={cn('mb-4 flex items-center gap-2 px-1', collapsed ? 'justify-center' : '')}>
-        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-primary-gradient text-[hsl(var(--primary-foreground))] shadow-[0_12px_28px_var(--nav-brand-shadow)]">
-          <BarChart3 className="h-5 w-5" />
-        </div>
+    <div className="flex h-full w-full flex-col">
+      <div className={cn('mb-4 flex w-full items-center px-1', collapsed ? 'justify-center' : '')}>
         {!collapsed ? (
-          <p className="min-w-0 truncate text-sm font-semibold text-foreground">DSA</p>
+          <p className="w-full rounded-xl px-2 py-1.5 text-center text-[15px] font-semibold tracking-wide text-foreground">
+            股票分析师
+          </p>
         ) : null}
       </div>
 
       <nav className="flex flex-1 flex-col gap-1.5" aria-label="主导航">
         {navItems.map(({ key, label, to, icon: Icon, exact, badge }) => (
+      <nav className="flex w-full flex-1 flex-col gap-1.5" aria-label="主导航">
+        {NAV_ITEMS.map(({ key, label, to, icon: Icon, exact, badge }) => (
           <NavLink
             key={key}
             to={to}
@@ -90,7 +93,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
             aria-label={label}
             className={({ isActive }) =>
               cn(
-                'group relative flex items-center gap-3 border-y border-x-0 text-sm transition-all',
+                'group relative flex w-full items-center gap-3 border-y border-x-0 text-sm transition-all',
                 'h-[var(--nav-item-height)]',
                 collapsed ? 'justify-center px-0' : 'px-[var(--nav-item-padding-x)]',
                 isActive

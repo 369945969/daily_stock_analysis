@@ -531,16 +531,30 @@ def _uses_direct_env_provider(model: str) -> bool:
 def normalize_agent_litellm_model(
     model: str,
     configured_models: Optional[set[str]] = None,
+    *,
+    base_url: Optional[str] = None,
+    protocol: Optional[str] = None,
 ) -> str:
     """Normalize AGENT_LITELLM_MODEL while preserving configured router aliases."""
     normalized_model = (model or "").strip()
     if not normalized_model:
         return ""
-    if "/" not in normalized_model:
-        if configured_models and normalized_model in configured_models:
-            return normalized_model
-        return f"openai/{normalized_model}"
-    return normalized_model
+    if configured_models and normalized_model in configured_models:
+        return normalized_model
+
+    effective_protocol = protocol
+    if effective_protocol is None:
+        effective_protocol = resolve_llm_channel_protocol(
+            None,
+            base_url=base_url,
+            models=[normalized_model],
+        )
+
+    return normalize_llm_channel_model(
+        normalized_model,
+        effective_protocol,
+        base_url=base_url,
+    )
 
 
 def get_effective_agent_primary_model(config: "Config") -> str:
@@ -551,10 +565,15 @@ def get_effective_agent_primary_model(config: "Config") -> str:
     configured_agent_model = normalize_agent_litellm_model(
         getattr(config, "agent_litellm_model", ""),
         configured_models=configured_router_models,
+        base_url=getattr(config, "openai_base_url", None),
     )
     if configured_agent_model:
         return configured_agent_model
-    return (getattr(config, "litellm_model", "") or "").strip()
+    return normalize_agent_litellm_model(
+        getattr(config, "litellm_model", "") or "",
+        configured_models=configured_router_models,
+        base_url=getattr(config, "openai_base_url", None),
+    )
 
 
 def get_effective_agent_models_to_try(config: "Config") -> List[str]:
@@ -571,14 +590,17 @@ def get_effective_agent_models_to_try(config: "Config") -> List[str]:
         normalized_model = (model or "").strip()
         if not normalized_model:
             continue
-        dedupe_key = normalize_agent_litellm_model(
+        effective_model = normalize_agent_litellm_model(
             normalized_model,
             configured_models=configured_router_models,
+            base_url=getattr(config, "openai_base_url", None),
         )
-        if dedupe_key in seen:
+        if not effective_model:
             continue
-        seen.add(dedupe_key)
-        ordered_models.append(normalized_model)
+        if effective_model in seen:
+            continue
+        seen.add(effective_model)
+        ordered_models.append(effective_model)
     return ordered_models
 
 

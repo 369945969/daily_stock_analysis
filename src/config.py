@@ -549,6 +549,8 @@ def normalize_agent_litellm_model(
             base_url=base_url,
             models=[normalized_model],
         )
+    if not effective_protocol:
+        effective_protocol = "openai"
 
     return normalize_llm_channel_model(
         normalized_model,

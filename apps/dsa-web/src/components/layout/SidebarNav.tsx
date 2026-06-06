@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { BarChart3, Bell, BriefcaseBusiness, Home, LogOut, MessageSquareQuote, Search, Settings2 } from 'lucide-react';
-import { BarChart3, Bell, BriefcaseBusiness, Home, List, LogOut, MessageSquareQuote, Settings2 } from 'lucide-react';
+import { BarChart3, Bell, BriefcaseBusiness, Home, List, LogOut, MessageSquareQuote, Search, Settings2 } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { ALPHASIFT_CONFIG_CHANGED_EVENT, SYSTEM_CONFIG_CHANGED_EVENT, alphasiftApi } from '../../api/alphasift';
 import { useAuth } from '../../contexts/AuthContext';
@@ -81,10 +80,8 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
         ) : null}
       </div>
 
-      <nav className="flex flex-1 flex-col gap-1.5" aria-label="主导航">
-        {navItems.map(({ key, label, to, icon: Icon, exact, badge }) => (
       <nav className="flex w-full flex-1 flex-col gap-1.5" aria-label="主导航">
-        {NAV_ITEMS.map(({ key, label, to, icon: Icon, exact, badge }) => (
+        {navItems.map(({ key, label, to, icon: Icon, exact, badge }) => (
           <NavLink
             key={key}
             to={to}

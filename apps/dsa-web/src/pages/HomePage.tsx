@@ -812,7 +812,6 @@ const HomePage: React.FC = () => {
                 <DashboardStateBlock title="加载报告中..." loading />
               </div>
             ) : selectedReport ? (
-              <div className={isHistoryTrendOpen ? 'max-w-6xl space-y-4 pb-8' : 'max-w-4xl space-y-4 pb-8'}>
               <div className="w-full min-w-0 space-y-4 pb-8">
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   <Button

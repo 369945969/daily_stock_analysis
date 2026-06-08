@@ -94,6 +94,9 @@ def _has_gotify_base_url(value: Optional[str]) -> bool:
 
 
 AGENT_MAX_STEPS_DEFAULT = 10
+AGENT_LLM_TIMEOUT_S_DEFAULT = 180
+AGENT_LLM_TIMEOUT_S_LOCAL_DEFAULT = 1800
+AGENT_TOOL_TIMEOUT_S_DEFAULT = 120
 FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT = 8.0
 NEWS_STRATEGY_WINDOWS: Dict[str, int] = {
     "ultra_short": 1,
@@ -236,6 +239,15 @@ def parse_env_float(
         )
         parsed = maximum
     return parsed
+
+
+def _is_local_openai_base_url(url: Optional[str]) -> bool:
+    raw_url = (url or "").strip()
+    if not raw_url:
+        return False
+    parsed = urlparse(raw_url)
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
 
 
 def normalize_news_strategy_profile(value: Optional[str]) -> str:
@@ -748,6 +760,8 @@ class Config:
     agent_arch: str = "single"     # Agent architecture: 'single' (legacy) or 'multi' (orchestrator)
     agent_orchestrator_mode: str = "standard"  # Orchestrator mode: quick/standard/full/specialist
     agent_orchestrator_timeout_s: int = 600  # Cooperative timeout budget for the whole multi-agent pipeline
+    agent_llm_timeout_s: int = AGENT_LLM_TIMEOUT_S_DEFAULT
+    agent_tool_timeout_s: int = AGENT_TOOL_TIMEOUT_S_DEFAULT
     agent_risk_override: bool = True  # Allow risk agent to veto buy signals
     agent_deep_research_budget: int = 30000  # Max token budget for deep research
     agent_deep_research_timeout: int = 180  # Max seconds for /research command before returning timeout
@@ -1534,6 +1548,20 @@ class Config:
                 600,
                 field_name='AGENT_ORCHESTRATOR_TIMEOUT_S',
                 minimum=0,
+            ),
+            agent_llm_timeout_s=parse_env_int(
+                os.getenv('AGENT_LLM_TIMEOUT_S'),
+                AGENT_LLM_TIMEOUT_S_LOCAL_DEFAULT
+                if _is_local_openai_base_url(openai_base_url) and os.getenv('AGENT_LLM_TIMEOUT_S') is None
+                else AGENT_LLM_TIMEOUT_S_DEFAULT,
+                field_name='AGENT_LLM_TIMEOUT_S',
+                minimum=30,
+            ),
+            agent_tool_timeout_s=parse_env_int(
+                os.getenv('AGENT_TOOL_TIMEOUT_S'),
+                AGENT_TOOL_TIMEOUT_S_DEFAULT,
+                field_name='AGENT_TOOL_TIMEOUT_S',
+                minimum=10,
             ),
             agent_risk_override=os.getenv('AGENT_RISK_OVERRIDE', 'true').lower() == 'true',
             agent_deep_research_budget=parse_env_int(

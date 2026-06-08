@@ -16,11 +16,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Dict, List, Any, TYPE_CHECKING, Tuple, Literal, Callable
 
 if TYPE_CHECKING:
@@ -35,6 +37,53 @@ from src.services.run_diagnostics import (
 from src.utils.analysis_metadata import SELECTION_SOURCES
 
 logger = logging.getLogger(__name__)
+
+# #region debug-point C:analysis-timeout-task-queue
+def _report_analysis_timeout_debug_event(
+    hypothesis_id: str,
+    msg: str,
+    *,
+    data: Optional[Dict[str, Any]] = None,
+    trace_id: Optional[str] = None,
+    run_id: str = "pre",
+) -> None:
+    try:
+        import json as _json
+        import urllib.request as _urllib_request
+
+        env_path = Path(__file__).resolve().parents[2] / ".dbg" / "analysis-timeout.env"
+        url = "http://127.0.0.1:7777/event"
+        session_id = "analysis-timeout"
+        try:
+            content = env_path.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if line.startswith("DEBUG_SERVER_URL="):
+                    url = line.split("=", 1)[1].strip() or url
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    session_id = line.split("=", 1)[1].strip() or session_id
+        except Exception:
+            pass
+
+        payload = {
+            "sessionId": session_id,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "traceId": trace_id,
+            "location": "src.services.task_queue",
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+            "ts": int(time.time() * 1000),
+        }
+        req = _urllib_request.Request(
+            url,
+            data=_json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urllib_request.urlopen(req, timeout=0.5).read()
+    except Exception:
+        return
+# #endregion
 
 
 def _dedupe_stock_code_key(stock_code: str) -> str:
@@ -364,6 +413,7 @@ class AnalysisTaskQueue:
         - Duplicate stocks are skipped and recorded in duplicates.
         - If executor submission fails, the current batch is rolled back.
         """
+        t0 = time.monotonic()
         self.validate_selection_source(selection_source)
 
         accepted: List[TaskInfo] = []
@@ -426,6 +476,24 @@ class AnalysisTaskQueue:
             for task_info in accepted:
                 self._broadcast_event("task_created", task_info.to_dict())
 
+        _report_analysis_timeout_debug_event(
+            "C",
+            "submit_tasks_batch completed",
+            data={
+                "requested": len(stock_codes),
+                "canonical": len(canonical_codes),
+                "accepted": len(accepted),
+                "duplicates": len(duplicates),
+                "accepted_sample": [t.task_id for t in accepted[:3]],
+                "report_type": report_type,
+                "force_refresh": bool(force_refresh),
+                "notify": bool(notify),
+                "selection_source": selection_source,
+                "skills_count": len(skills) if skills is not None else 0,
+                "ms": int((time.monotonic() - t0) * 1000),
+            },
+            trace_id=(accepted[0].trace_id if accepted else None),
+        )
         return accepted, duplicates
 
     def submit_background_task(
@@ -582,6 +650,19 @@ class AnalysisTaskQueue:
             task_snapshot = task.copy()
 
         self._broadcast_event(event_type, task_snapshot.to_dict())
+        _report_analysis_timeout_debug_event(
+            "C",
+            "task_progress",
+            data={
+                "task_id": task_snapshot.task_id,
+                "stock_code": task_snapshot.stock_code,
+                "status": task_snapshot.status.value,
+                "progress": task_snapshot.progress,
+                "message": task_snapshot.message,
+                "event_type": event_type,
+            },
+            trace_id=task_snapshot.trace_id or task_snapshot.task_id,
+        )
         return task_snapshot
     
     # ========== 任务执行 ==========
@@ -619,6 +700,20 @@ class AnalysisTaskQueue:
             task.progress = 10
         
         self._broadcast_event("task_started", task.to_dict())
+        _report_analysis_timeout_debug_event(
+            "C",
+            "task_started",
+            data={
+                "task_id": task_id,
+                "stock_code": stock_code,
+                "report_type": report_type,
+                "force_refresh": bool(force_refresh),
+                "notify": bool(notify),
+                "skills_count": len(skills) if skills is not None else 0,
+                "max_workers": self._max_workers,
+            },
+            trace_id=trace_id,
+        )
         
         try:
             # 导入分析服务（延迟导入避免循环依赖）
@@ -639,6 +734,18 @@ class AnalysisTaskQueue:
                     stock_code=stock_code,
                     trigger_source="api",
                 )
+            _report_analysis_timeout_debug_event(
+                "D",
+                "analysis_service.analyze_stock start",
+                data={
+                    "task_id": task_id,
+                    "stock_code": stock_code,
+                    "report_type": report_type,
+                    "force_refresh": bool(force_refresh),
+                },
+                trace_id=trace_id,
+            )
+            analyze_started_at = time.monotonic()
             result = service.analyze_stock(
                 stock_code=stock_code,
                 report_type=report_type,
@@ -648,6 +755,18 @@ class AnalysisTaskQueue:
                 send_notification=notify,
                 progress_callback=_on_progress,
                 skills=skills,
+            )
+            _report_analysis_timeout_debug_event(
+                "D",
+                "analysis_service.analyze_stock end",
+                data={
+                    "task_id": task_id,
+                    "stock_code": stock_code,
+                    "ok": bool(result),
+                    "ms": int((time.monotonic() - analyze_started_at) * 1000),
+                    "last_error": getattr(service, "last_error", None),
+                },
+                trace_id=trace_id,
             )
             reset_run_diagnostic_context(diag_token)
             diag_token = None
@@ -670,6 +789,15 @@ class AnalysisTaskQueue:
                             del self._analyzing_stocks[dedupe_key]
                 
                 self._broadcast_event("task_completed", task.to_dict())
+                _report_analysis_timeout_debug_event(
+                    "C",
+                    "task_completed",
+                    data={
+                        "task_id": task_id,
+                        "stock_code": stock_code,
+                    },
+                    trace_id=trace_id,
+                )
                 logger.info(f"[TaskQueue] 任务完成: {task_id} ({stock_code})")
                 
                 # 清理过期任务
@@ -685,6 +813,16 @@ class AnalysisTaskQueue:
                 reset_run_diagnostic_context(diag_token)
             error_msg = str(e)
             logger.error(f"[TaskQueue] 任务失败: {task_id} ({stock_code}), 错误: {error_msg}")
+            _report_analysis_timeout_debug_event(
+                "C",
+                "task_failed",
+                data={
+                    "task_id": task_id,
+                    "stock_code": stock_code,
+                    "error": error_msg,
+                },
+                trace_id=trace_id if "trace_id" in locals() else task_id,
+            )
             
             with self._data_lock:
                 task = self._tasks.get(task_id)

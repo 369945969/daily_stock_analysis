@@ -394,18 +394,20 @@ const ChatPage: React.FC = () => {
   }, [requestScrollToBottom, switchSession]);
 
   const confirmDelete = useCallback(() => {
-    if (!deleteConfirmId) return;
-    agentApi.deleteChatSession(deleteConfirmId)
+    const targetSessionId = deleteConfirmId;
+    if (!targetSessionId) return;
+    setDeleteConfirmId(null);
+    const deletingCurrent = targetSessionId === sessionId;
+    if (deletingCurrent) {
+      handleStartNewChat();
+    }
+    agentApi.deleteChatSession(targetSessionId)
       .then(() => {
         loadSessions();
-        if (deleteConfirmId === sessionId) {
-          handleStartNewChat();
-        }
       })
       .catch((error) => {
         console.error('Failed to delete chat session:', error);
       });
-    setDeleteConfirmId(null);
   }, [deleteConfirmId, sessionId, loadSessions, handleStartNewChat]);
 
   // Handle follow-up from report page: ?stock=600519&name=贵州茅台&recordId=xxx
@@ -836,6 +838,32 @@ const ChatPage: React.FC = () => {
                         />
                       </svg>
                       导出会话
+                    </Button>
+                  </span>
+                </Tooltip>
+                <Tooltip content="清空当前对话（删除聊天日志）">
+                  <span className="inline-flex">
+                    <Button
+                      variant="danger-subtle"
+                      size="sm"
+                      disabled={loading}
+                      onClick={() => setDeleteConfirmId(sessionId)}
+                      aria-label="清空当前对话（删除聊天日志）"
+                    >
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7h6m-7 0V5a1 1 0 011-1h4a1 1 0 011 1v2"
+                        />
+                      </svg>
+                      清空对话
                     </Button>
                   </span>
                 </Tooltip>

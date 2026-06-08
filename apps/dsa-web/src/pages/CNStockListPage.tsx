@@ -21,6 +21,31 @@ const FAVORITES_STORAGE_KEY = 'dsa.cnStocks.favorites.v1';
 const BLACKLIST_STORAGE_KEY = 'dsa.cnStocks.blacklist.v1';
 const BATCH_HISTORY_STORAGE_KEY = 'dsa.cnStocks.batchHistory.v1';
 
+// #region debug-point A:analysis-timeout-batch-client
+const DEBUG_ANALYSIS_TIMEOUT_URL = 'http://127.0.0.1:7777/event';
+const DEBUG_ANALYSIS_TIMEOUT_SESSION_ID = 'analysis-timeout';
+function reportAnalysisTimeoutDebugEvent(
+  hypothesisId: string,
+  msg: string,
+  data?: Record<string, unknown>,
+  traceId?: string,
+): void {
+  fetch(DEBUG_ANALYSIS_TIMEOUT_URL, {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: DEBUG_ANALYSIS_TIMEOUT_SESSION_ID,
+      runId: 'pre',
+      hypothesisId,
+      traceId,
+      location: 'CNStockListPage',
+      msg: `[DEBUG] ${msg}`,
+      data: data ?? {},
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+}
+// #endregion
+
 function classifyAStock(item: StockIndexItem): Exclude<TabKey, 'all'> | null {
   const canonical = item.canonicalCode.toUpperCase();
   const code = item.displayCode;
@@ -588,12 +613,27 @@ const CNStockListPage: React.FC = () => {
   const runSingleAnalysis = useCallback(async (stock: StockIndexItem, seq: number) => {
     const stockCode = stock.displayCode;
     const stockName = stock.nameZh;
+    const debugTraceId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+    const startedAt = Date.now();
 
     updateBatchItem(stockCode, { status: 'running' });
     setBatchCurrent(`${stockName}(${stockCode})`);
+    reportAnalysisTimeoutDebugEvent(
+      'A',
+      'runSingleAnalysis start',
+      {
+        stockCode,
+        stockName,
+        seq,
+        forceRefresh,
+        skillsCount: selectedAnalysisSkills?.length ?? 0,
+      },
+      debugTraceId,
+    );
 
     let taskId: string | null = null;
     try {
+      const acceptedStartedAt = Date.now();
       const accepted = await analysisApi.analyzeAsync({
         stockCode,
         stockName,
@@ -603,41 +643,124 @@ const CNStockListPage: React.FC = () => {
         forceRefresh,
         skills: selectedAnalysisSkills,
       });
+      reportAnalysisTimeoutDebugEvent(
+        'A',
+        'analysisApi.analyzeAsync accepted',
+        {
+          ms: Date.now() - acceptedStartedAt,
+          accepted,
+        },
+        debugTraceId,
+      );
       if ('taskId' in accepted && accepted.taskId) {
         taskId = accepted.taskId;
       }
     } catch (caught) {
       if (caught instanceof DuplicateTaskError) {
         taskId = caught.existingTaskId;
+        reportAnalysisTimeoutDebugEvent(
+          'A',
+          'analysisApi.analyzeAsync duplicate',
+          {
+            stockCode,
+            existingTaskId: taskId,
+          },
+          debugTraceId,
+        );
       } else {
+        reportAnalysisTimeoutDebugEvent(
+          'A',
+          'analysisApi.analyzeAsync failed',
+          {
+            stockCode,
+            error: caught instanceof Error ? { name: caught.name, message: caught.message } : String(caught),
+          },
+          debugTraceId,
+        );
         throw caught;
       }
     }
 
     if (!taskId) {
+      reportAnalysisTimeoutDebugEvent('A', 'missing taskId', { stockCode }, debugTraceId);
       throw new Error('未获取到任务 ID');
     }
 
-    const maxAttempts = 240;
+    const maxAttempts = 1200;
     const intervalMs = 1500;
     let attempts = 0;
+    let lastStatusKey = '';
 
     while (!batchCancelRef.current) {
       attempts += 1;
       if (attempts > maxAttempts) {
+        reportAnalysisTimeoutDebugEvent(
+          'C',
+          'task poll timeout',
+          {
+            stockCode,
+            taskId,
+            attempts,
+            intervalMs,
+            elapsedMs: Date.now() - startedAt,
+          },
+          debugTraceId,
+        );
         throw new Error('任务超时');
       }
 
+      const pollStartedAt = Date.now();
       const status = await analysisApi.getStatus(taskId);
+      const statusKey = `${status.status}:${typeof status.progress === 'number' ? status.progress : ''}`;
+      if (statusKey !== lastStatusKey) {
+        lastStatusKey = statusKey;
+        reportAnalysisTimeoutDebugEvent(
+          'C',
+          'task status update',
+          {
+            stockCode,
+            taskId,
+            attempts,
+            ms: Date.now() - pollStartedAt,
+            status: status.status,
+            progress: status.progress,
+            error: status.error,
+          },
+          debugTraceId,
+        );
+      }
       if (status.status === 'pending' || status.status === 'processing') {
         await sleep(intervalMs);
         continue;
       }
       if (status.status === 'failed') {
+        reportAnalysisTimeoutDebugEvent(
+          'C',
+          'task failed',
+          {
+            stockCode,
+            taskId,
+            attempts,
+            error: status.error,
+            elapsedMs: Date.now() - startedAt,
+          },
+          debugTraceId,
+        );
         throw new Error(status.error || '分析失败');
       }
       if (status.status === 'completed') {
         if (!status.result) {
+          reportAnalysisTimeoutDebugEvent(
+            'C',
+            'task completed without result',
+            {
+              stockCode,
+              taskId,
+              attempts,
+              elapsedMs: Date.now() - startedAt,
+            },
+            debugTraceId,
+          );
           throw new Error('任务已完成但无结果');
         }
         const result = status.result;
@@ -665,6 +788,19 @@ const CNStockListPage: React.FC = () => {
           changePct,
           error: undefined,
         });
+        reportAnalysisTimeoutDebugEvent(
+          'C',
+          'task completed',
+          {
+            stockCode,
+            taskId,
+            attempts,
+            elapsedMs: Date.now() - startedAt,
+            sentimentScore,
+            recordId,
+          },
+          debugTraceId,
+        );
         return;
       }
     }

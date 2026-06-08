@@ -6,6 +6,7 @@ Agent API endpoints.
 import asyncio
 import json
 import logging
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -157,6 +158,7 @@ async def agent_chat(request: ChatRequest):
         
     session_id = request.session_id or str(uuid.uuid4())
     
+    started_at = time.monotonic()
     try:
         skills = request.effective_skills
         executor = _build_executor(config, skills or None)
@@ -167,6 +169,13 @@ async def agent_chat(request: ChatRequest):
         ctx = dict(request.context or {})
         if skills is not None:
             ctx["skills"] = skills
+        logger.info(
+            "[agent.chat] start session=%s skills=%s context_keys=%s msg_len=%s",
+            session_id,
+            skills,
+            sorted(ctx.keys()),
+            len(request.message or ""),
+        )
 
         # Offload the blocking call to a thread to avoid blocking the event loop.
         loop = asyncio.get_running_loop()
@@ -174,6 +183,13 @@ async def agent_chat(request: ChatRequest):
             None,
             lambda: executor.chat(message=request.message, session_id=session_id,
                                   context=ctx),
+        )
+        logger.info(
+            "[agent.chat] done session=%s ok=%s ms=%s error=%s",
+            session_id,
+            getattr(result, "success", False),
+            int((time.monotonic() - started_at) * 1000),
+            getattr(result, "error", None),
         )
 
         return ChatResponse(
@@ -186,6 +202,12 @@ async def agent_chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"Agent chat API failed: {e}")
         logger.exception("Agent chat error details:")
+        logger.info(
+            "[agent.chat] failed session=%s ms=%s err_type=%s",
+            session_id,
+            int((time.monotonic() - started_at) * 1000),
+            type(e).__name__,
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -402,16 +424,40 @@ async def agent_chat_stream(request: ChatRequest):
         if event.get("type") in ("tool_start", "tool_done"):
             tool = event.get("tool", "")
             event["display_name"] = TOOL_DISPLAY_NAMES.get(tool, tool)
+        if event.get("type") in ("tool_start", "tool_done"):
+            logger.info(
+                "[agent.stream] session=%s %s tool=%s success=%s duration=%s",
+                session_id,
+                event.get("type"),
+                event.get("tool"),
+                event.get("success"),
+                event.get("duration"),
+            )
         asyncio.run_coroutine_threadsafe(queue.put(event), loop)
 
     def run_sync():
         try:
+            run_started_at = time.monotonic()
+            logger.info(
+                "[agent.stream] start session=%s skills=%s context_keys=%s msg_len=%s",
+                session_id,
+                skills,
+                sorted(stream_ctx.keys()),
+                len(request.message or ""),
+            )
             executor = _build_executor(config, skills or None)
             result = executor.chat(
                 message=request.message,
                 session_id=session_id,
                 progress_callback=progress_callback,
                 context=stream_ctx,
+            )
+            logger.info(
+                "[agent.stream] done session=%s ok=%s ms=%s error=%s",
+                session_id,
+                getattr(result, "success", False),
+                int((time.monotonic() - run_started_at) * 1000),
+                getattr(result, "error", None),
             )
             asyncio.run_coroutine_threadsafe(
                 queue.put({
@@ -426,6 +472,7 @@ async def agent_chat_stream(request: ChatRequest):
             )
         except Exception as exc:
             logger.error(f"Agent stream error: {exc}")
+            logger.exception("[agent.stream] session=%s error details:", session_id)
             asyncio.run_coroutine_threadsafe(
                 queue.put({"type": "error", "message": str(exc)}),
                 loop,
@@ -439,8 +486,12 @@ async def agent_chat_stream(request: ChatRequest):
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=300.0)
                 except asyncio.TimeoutError:
-                    yield "data: " + json.dumps({"type": "error", "message": "分析超时"}, ensure_ascii=False) + "\n\n"
-                    break
+                    logger.warning("[agent.stream] idle_keepalive session=%s", session_id)
+                    yield "data: " + json.dumps(
+                        {"type": "thinking", "message": "仍在分析中，请稍候...", "ts": int(time.time())},
+                        ensure_ascii=False,
+                    ) + "\n\n"
+                    continue
                 yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
                 if event.get("type") in ("done", "error"):
                     break

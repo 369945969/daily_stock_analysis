@@ -36,6 +36,31 @@ let activeTaskRequestSeq = 0;
 let activeTaskLocalRevision = 0;
 const dismissedTaskIds = new Set<string>();
 
+// #region debug-point A:analysis-timeout-client
+const DEBUG_ANALYSIS_TIMEOUT_URL = 'http://127.0.0.1:7777/event';
+const DEBUG_ANALYSIS_TIMEOUT_SESSION_ID = 'analysis-timeout';
+function reportAnalysisTimeoutDebugEvent(
+  hypothesisId: string,
+  msg: string,
+  data?: Record<string, unknown>,
+  traceId?: string,
+): void {
+  fetch(DEBUG_ANALYSIS_TIMEOUT_URL, {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: DEBUG_ANALYSIS_TIMEOUT_SESSION_ID,
+      runId: 'pre',
+      hypothesisId,
+      traceId,
+      location: 'stockPoolStore.submitAnalysis',
+      msg: `[DEBUG] ${msg}`,
+      data: data ?? {},
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+}
+// #endregion
+
 export interface StockPoolState {
   query: string;
   selectionSource: SelectionSource;
@@ -557,6 +582,20 @@ export const useStockPoolStore = create<StockPoolState>((set, get) => ({
     const notify = options?.notify ?? state.notify;
     const forceRefresh = options?.forceRefresh ?? false;
     const skills = options?.skills;
+    const debugTraceId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+
+    reportAnalysisTimeoutDebugEvent(
+      'A',
+      'submitAnalysis called',
+      {
+        stockCodeInput,
+        selectionSource,
+        notify,
+        forceRefresh,
+        skillsCount: Array.isArray(skills) ? skills.length : undefined,
+      },
+      debugTraceId,
+    );
 
     if (!stockCodeInput) {
       set({ inputError: '请输入股票代码', duplicateError: null });
@@ -587,7 +626,8 @@ export const useStockPoolStore = create<StockPoolState>((set, get) => ({
 
     const requestId = ++analyzeRequestSeq;
     try {
-      await analysisApi.analyzeAsync({
+      const startedAt = Date.now();
+      const accepted = await analysisApi.analyzeAsync({
         stockCode: normalizedStockCode,
         reportType: 'detailed',
         stockName,
@@ -597,6 +637,16 @@ export const useStockPoolStore = create<StockPoolState>((set, get) => ({
         forceRefresh,
         skills,
       });
+      reportAnalysisTimeoutDebugEvent(
+        'A',
+        'analysisApi.analyzeAsync accepted',
+        {
+          ms: Date.now() - startedAt,
+          accepted,
+          normalizedStockCode,
+        },
+        debugTraceId,
+      );
 
       if (requestId !== analyzeRequestSeq) {
         return;
@@ -612,13 +662,32 @@ export const useStockPoolStore = create<StockPoolState>((set, get) => ({
       }
 
       if (error instanceof DuplicateTaskError) {
+        reportAnalysisTimeoutDebugEvent(
+          'A',
+          'analysisApi.analyzeAsync duplicate',
+          {
+            stockCode: error.stockCode,
+            existingTaskId: error.existingTaskId,
+          },
+          debugTraceId,
+        );
         set({
           duplicateError: `股票 ${error.stockCode} 正在分析中，请等待完成`,
         });
         return;
       }
 
-      set({ error: getParsedApiError(error) });
+      const parsed = getParsedApiError(error);
+      reportAnalysisTimeoutDebugEvent(
+        'A',
+        'analysisApi.analyzeAsync failed',
+        {
+          parsed,
+          rawError: error instanceof Error ? { name: error.name, message: error.message } : String(error),
+        },
+        debugTraceId,
+      );
+      set({ error: parsed });
     } finally {
       if (requestId === analyzeRequestSeq) {
         set({ isAnalyzing: false });

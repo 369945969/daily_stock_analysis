@@ -20,18 +20,80 @@ import time
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Optional, List, Tuple, Dict, Any
 
 import pandas as pd
 import numpy as np
 from src.data.stock_index_loader import get_index_stock_name
 from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
-from src.services.run_diagnostics import record_provider_run
+from src.services.run_diagnostics import record_provider_run, get_current_diagnostic_context
 from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 
 # 配置日志
 logger = logging.getLogger(__name__)
+
+# #region debug-point E:analysis-timeout-data-provider
+def _report_analysis_timeout_debug_event(
+    hypothesis_id: str,
+    msg: str,
+    *,
+    data: Optional[Dict[str, Any]] = None,
+    trace_id: Optional[str] = None,
+    run_id: str = "pre",
+) -> None:
+    try:
+        import json as _json
+        import urllib.request as _urllib_request
+
+        env_path = Path(__file__).resolve().parents[1] / ".dbg" / "analysis-timeout.env"
+        url = "http://127.0.0.1:7777/event"
+        session_id = "analysis-timeout"
+        try:
+            content = env_path.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if line.startswith("DEBUG_SERVER_URL="):
+                    url = line.split("=", 1)[1].strip() or url
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    session_id = line.split("=", 1)[1].strip() or session_id
+        except Exception:
+            pass
+
+        payload = {
+            "sessionId": session_id,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "traceId": trace_id,
+            "location": "data_provider.base",
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+            "ts": int(time.time() * 1000),
+        }
+        req = _urllib_request.Request(
+            url,
+            data=_json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urllib_request.urlopen(req, timeout=0.5).read()
+    except Exception:
+        return
+
+
+def _current_trace_id() -> Optional[str]:
+    try:
+        ctx = get_current_diagnostic_context()
+        tid = getattr(ctx, "trace_id", None) if ctx is not None else None
+        if isinstance(tid, str) and tid.strip():
+            return tid
+    except Exception:
+        return None
+    return None
+# #endregion
+
+_FETCHER_HARD_TIMEOUT_METHODS = {"get_chip_distribution", "get_realtime_quote"}
+_FETCHER_HARD_TIMEOUT_SECONDS = 20.0
 
 
 # === 标准化列名定义 ===
@@ -685,8 +747,58 @@ class DataFetcherManager:
     def _call_fetcher_method(self, fetcher: BaseFetcher, method_name: str, *args, **kwargs):
         """Serialize shared fetcher state access through manager-owned per-instance locks."""
         method = getattr(fetcher, method_name)
-        with self._get_fetcher_call_lock(fetcher):
-            return method(*args, **kwargs)
+        lock = self._get_fetcher_call_lock(fetcher)
+        if method_name not in _FETCHER_HARD_TIMEOUT_METHODS:
+            with lock:
+                return method(*args, **kwargs)
+
+        trace_id = _current_trace_id()
+        _report_analysis_timeout_debug_event(
+            "E",
+            "fetcher hard-timeout guard start",
+            data={
+                "fetcher": getattr(fetcher, "name", type(fetcher).__name__),
+                "method": method_name,
+                "timeout_s": _FETCHER_HARD_TIMEOUT_SECONDS,
+            },
+            trace_id=trace_id,
+        )
+        started_at = time.time()
+        state: Dict[str, Any] = {}
+
+        def _runner() -> None:
+            try:
+                with lock:
+                    state["value"] = method(*args, **kwargs)
+            except Exception as exc:
+                state["exc"] = exc
+
+        t = Thread(
+            target=_runner,
+            daemon=True,
+            name=f"dsa-fetcher-{getattr(fetcher, 'name', type(fetcher).__name__)}-{method_name}",
+        )
+        t.start()
+        t.join(_FETCHER_HARD_TIMEOUT_SECONDS)
+        if t.is_alive():
+            _report_analysis_timeout_debug_event(
+                "E",
+                "fetcher hard-timeout hit",
+                data={
+                    "fetcher": getattr(fetcher, "name", type(fetcher).__name__),
+                    "method": method_name,
+                    "elapsed_ms": int((time.time() - started_at) * 1000),
+                },
+                trace_id=trace_id,
+            )
+            raise TimeoutError(
+                f"{getattr(fetcher, 'name', type(fetcher).__name__)}.{method_name} timed out after "
+                f"{_FETCHER_HARD_TIMEOUT_SECONDS}s"
+            )
+
+        if "exc" in state:
+            raise state["exc"]
+        return state.get("value")
 
     @classmethod
     def _filter_daily_fetchers_for_market(
@@ -1775,10 +1887,32 @@ class DataFetcherManager:
                 error_message="fetcher unavailable",
             )
             return None
+        trace_id = _current_trace_id()
+        _report_analysis_timeout_debug_event(
+            "E",
+            "realtime_quote attempt start",
+            data={
+                "stock_code": stock_code,
+                "fetcher_name": fetcher_name,
+                "kw_keys": list(kw.keys()),
+            },
+            trace_id=trace_id,
+        )
         attempt_start = time.time()
         try:
             q = self._call_fetcher_method(fetcher, 'get_realtime_quote', stock_code, **kw)
             if q is not None and q.has_basic_data():
+                _report_analysis_timeout_debug_event(
+                    "E",
+                    "realtime_quote attempt end",
+                    data={
+                        "stock_code": stock_code,
+                        "fetcher": fetcher.name,
+                        "ok": True,
+                        "ms": int((time.time() - attempt_start) * 1000),
+                    },
+                    trace_id=trace_id,
+                )
                 record_provider_run(
                     data_type="realtime_quote",
                     provider=fetcher.name,
@@ -1788,6 +1922,17 @@ class DataFetcherManager:
                     record_count=1,
                 )
                 return q
+            _report_analysis_timeout_debug_event(
+                "E",
+                "realtime_quote attempt end",
+                data={
+                    "stock_code": stock_code,
+                    "fetcher": fetcher.name,
+                    "ok": False,
+                    "ms": int((time.time() - attempt_start) * 1000),
+                },
+                trace_id=trace_id,
+            )
             record_provider_run(
                 data_type="realtime_quote",
                 provider=fetcher.name,
@@ -1800,6 +1945,18 @@ class DataFetcherManager:
             )
         except Exception as e:
             error_type, error_reason = summarize_exception(e)
+            _report_analysis_timeout_debug_event(
+                "E",
+                "realtime_quote attempt error",
+                data={
+                    "stock_code": stock_code,
+                    "fetcher": fetcher.name,
+                    "ms": int((time.time() - attempt_start) * 1000),
+                    "error_type": error_type,
+                    "error_message": error_reason,
+                },
+                trace_id=trace_id,
+            )
             record_provider_run(
                 data_type="realtime_quote",
                 provider=fetcher.name,
@@ -1887,10 +2044,33 @@ class DataFetcherManager:
                 continue
 
             try:
+                trace_id = _current_trace_id()
+                attempt_start = time.time()
+                _report_analysis_timeout_debug_event(
+                    "E",
+                    "chip_distribution attempt start",
+                    data={
+                        "stock_code": stock_code,
+                        "fetcher": fetcher_name,
+                        "source_key": source_key,
+                    },
+                    trace_id=trace_id,
+                )
                 chip = self._call_fetcher_method(fetcher, 'get_chip_distribution', stock_code)
                 if _is_meaningful_chip_distribution(chip):
                     circuit_breaker.record_success(source_key)
                     logger.info(f"[筹码分布] {stock_code} 成功获取 (来源: {fetcher_name})")
+                    _report_analysis_timeout_debug_event(
+                        "E",
+                        "chip_distribution attempt end",
+                        data={
+                            "stock_code": stock_code,
+                            "fetcher": fetcher_name,
+                            "ok": True,
+                            "ms": int((time.time() - attempt_start) * 1000),
+                        },
+                        trace_id=trace_id,
+                    )
                     return chip
                 else:
                     if chip is not None:
@@ -1900,9 +2080,32 @@ class DataFetcherManager:
                         )
                     # 空结果或占位结果：释放 HALF_OPEN 探测名额，避免卡死
                     circuit_breaker.record_inconclusive(source_key)
+                    _report_analysis_timeout_debug_event(
+                        "E",
+                        "chip_distribution attempt end",
+                        data={
+                            "stock_code": stock_code,
+                            "fetcher": fetcher_name,
+                            "ok": False,
+                            "reason": "inconclusive",
+                            "ms": int((time.time() - attempt_start) * 1000),
+                        },
+                        trace_id=trace_id,
+                    )
             except Exception as e:
                 logger.warning(f"[筹码分布] {fetcher_name} 获取 {stock_code} 失败: {e}")
                 circuit_breaker.record_failure(source_key, str(e))
+                _report_analysis_timeout_debug_event(
+                    "E",
+                    "chip_distribution attempt error",
+                    data={
+                        "stock_code": stock_code,
+                        "fetcher": fetcher_name,
+                        "source_key": source_key,
+                        "error": str(e),
+                    },
+                    trace_id=_current_trace_id(),
+                )
                 continue
 
         logger.warning(f"[筹码分布] {stock_code} 所有数据源均失败")

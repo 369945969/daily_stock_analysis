@@ -12,6 +12,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
+import queue
+import threading
 
 import litellm
 from litellm import Router
@@ -35,6 +38,48 @@ from src.llm.generation_params import apply_litellm_generation_params, resolve_l
 
 logger = logging.getLogger(__name__)
 
+def _redact_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        netloc = parts.hostname or ""
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
+        safe = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        return safe[:240]
+    except Exception:
+        return url[:240]
+
+def _is_localhost_url(url: Optional[str]) -> bool:
+    if not url:
+        return False
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+        return host in {"127.0.0.1", "localhost", "::1"}
+    except Exception:
+        return False
+
+def _call_with_hard_timeout(func, timeout_seconds: float):
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+    error_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def runner():
+        try:
+            result_queue.put(func())
+        except Exception as exc:
+            error_queue.put(exc)
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    t.join(timeout=max(0.0, float(timeout_seconds)))
+    if t.is_alive():
+        raise TimeoutError(f"LLM call exceeded hard timeout {timeout_seconds}s")
+    if not error_queue.empty():
+        raise error_queue.get()
+    if result_queue.empty():
+        raise RuntimeError("LLM call returned no result")
+    return result_queue.get()
 
 def _resolve_litellm_exception(name: str) -> type[BaseException]:
     """Return a catchable LiteLLM exception class even in stubbed test environments."""
@@ -520,8 +565,23 @@ class LLMToolAdapter:
                 continue
 
         suffix = " (rate-limit encountered during fallback)" if hit_rate_limit else ""
-        error_msg = f"All LLM models failed{suffix}. Last error: {last_error}"
-        logger.error(error_msg)
+        timeout_exc = _resolve_litellm_exception("Timeout")
+        is_timeout = isinstance(last_error, (timeout_exc, TimeoutError))
+        local_base_url = getattr(config, "openai_base_url", None)
+        hint = ""
+        if is_timeout and _is_localhost_url(local_base_url):
+            hint = f" Hint: local OpenAI-compatible server did not respond within timeout at openai_base_url={_redact_url(local_base_url)}"
+        error_msg = (
+            f"All LLM models failed{suffix}. Models tried: {models_to_try}. "
+            f"Last error: {last_error}.{hint}"
+        )
+        logger.error(
+            "%s openai_base_url=%s http_proxy_set=%s https_proxy_set=%s",
+            error_msg,
+            _redact_url(getattr(config, "openai_base_url", None)),
+            bool(getattr(config, "http_proxy", None)),
+            bool(getattr(config, "https_proxy", None)),
+        )
         return LLMResponse(content=error_msg, provider="error")
 
     @staticmethod
@@ -542,6 +602,7 @@ class LLMToolAdapter:
         timeout: Optional[float] = None,
     ) -> LLMResponse:
         """Call a specific litellm model with OpenAI-format messages and tools."""
+        call_started_at = time.monotonic()
         openai_messages = self._convert_messages(messages, target_model=model)
 
         # Use short model name (without provider prefix) for thinking model lookup
@@ -588,37 +649,128 @@ class LLMToolAdapter:
         register_fallback_model_pricing(
             resolve_fallback_litellm_wire_models(model, self._config.llm_model_list)
         )
-        if use_channel_router and self._router and model in _router_model_names:
-            # Channel / YAML path: Router manages all models in its model_list
-            response = call_litellm_with_param_recovery(
-                lambda kwargs: self._router.completion(**kwargs),
-                model=model,
-                call_kwargs=call_kwargs,
-                model_list=recovery_model_list,
-                logger=logger,
+        logger.info(
+            "[agent.llm] start model=%s uses_router=%s timeout=%s messages=%s tools=%s",
+            model,
+            uses_router,
+            timeout,
+            len(openai_messages),
+            len(tools) if tools else 0,
+        )
+        try:
+            hard_timeout = float(timeout) if timeout is not None and float(timeout) > 0 else None
+            if use_channel_router and self._router and model in _router_model_names:
+                def do_call():
+                    return call_litellm_with_param_recovery(
+                        lambda kwargs: self._router.completion(**kwargs),
+                        model=model,
+                        call_kwargs=call_kwargs,
+                        model_list=recovery_model_list,
+                        logger=logger,
+                    )
+                response = _call_with_hard_timeout(do_call, hard_timeout + 2.0) if hard_timeout is not None else do_call()
+            elif self._router and model == agent_primary_model and not use_channel_router:
+                def do_call():
+                    return call_litellm_with_param_recovery(
+                        lambda kwargs: self._router.completion(**kwargs),
+                        model=model,
+                        call_kwargs=call_kwargs,
+                        model_list=recovery_model_list,
+                        logger=logger,
+                    )
+                response = _call_with_hard_timeout(do_call, hard_timeout + 2.0) if hard_timeout is not None else do_call()
+            else:
+                def do_call():
+                    return call_litellm_with_param_recovery(
+                        lambda kwargs: litellm.completion(**kwargs),
+                        model=model,
+                        call_kwargs=call_kwargs,
+                        model_list=self._config.llm_model_list,
+                        logger=logger,
+                    )
+                response = _call_with_hard_timeout(do_call, hard_timeout + 2.0) if hard_timeout is not None else do_call()
+            parsed = self._parse_litellm_response(response, model)
+            logger.info(
+                "[agent.llm] done model=%s provider=%s ms=%s tool_calls=%s content_len=%s",
+                model,
+                getattr(parsed, "provider", ""),
+                int((time.monotonic() - call_started_at) * 1000),
+                len(getattr(parsed, "tool_calls", []) or []),
+                len(getattr(parsed, "content", "") or "") if getattr(parsed, "content", None) is not None else None,
             )
-        elif self._router and model == agent_primary_model and not use_channel_router:
-            # Legacy path: Router for primary model multi-key
-            response = call_litellm_with_param_recovery(
-                lambda kwargs: self._router.completion(**kwargs),
-                model=model,
-                call_kwargs=call_kwargs,
-                model_list=recovery_model_list,
-                logger=logger,
+            return parsed
+        except Exception as exc:
+            logger.warning(
+                "[agent.llm] failed model=%s ms=%s err_type=%s err=%s",
+                model,
+                int((time.monotonic() - call_started_at) * 1000),
+                type(exc).__name__,
+                exc,
+                exc_info=True,
             )
-        else:
-            # Legacy/direct-env path: direct call (also handles direct-env
-            # providers like groq/ or bedrock/ that are not in the Router
-            # model_list even when channel mode is active)
-            response = call_litellm_with_param_recovery(
-                lambda kwargs: litellm.completion(**kwargs),
-                model=model,
-                call_kwargs=call_kwargs,
-                model_list=self._config.llm_model_list,
-                logger=logger,
-            )
-
-        return self._parse_litellm_response(response, model)
+            if tools and _is_localhost_url(getattr(self._config, "openai_base_url", None)):
+                timeout_exc = _resolve_litellm_exception("Timeout")
+                if isinstance(exc, (timeout_exc, TimeoutError)):
+                    retry_kwargs = dict(call_kwargs)
+                    retry_kwargs.pop("tools", None)
+                    retry_kwargs.pop("tool_choice", None)
+                    retry_kwargs["timeout"] = 30.0
+                    logger.warning(
+                        "[agent.llm] local openai_base_url timeout; retrying without tools model=%s timeout=%s",
+                        model,
+                        retry_kwargs["timeout"],
+                    )
+                    try:
+                        hard_timeout = float(retry_kwargs["timeout"]) if float(retry_kwargs["timeout"]) > 0 else None
+                        if use_channel_router and self._router and model in _router_model_names:
+                            def do_call():
+                                return call_litellm_with_param_recovery(
+                                    lambda kwargs: self._router.completion(**kwargs),
+                                    model=model,
+                                    call_kwargs=retry_kwargs,
+                                    model_list=recovery_model_list,
+                                    logger=logger,
+                                )
+                            response = _call_with_hard_timeout(do_call, hard_timeout + 2.0) if hard_timeout is not None else do_call()
+                        elif self._router and model == agent_primary_model and not use_channel_router:
+                            def do_call():
+                                return call_litellm_with_param_recovery(
+                                    lambda kwargs: self._router.completion(**kwargs),
+                                    model=model,
+                                    call_kwargs=retry_kwargs,
+                                    model_list=recovery_model_list,
+                                    logger=logger,
+                                )
+                            response = _call_with_hard_timeout(do_call, hard_timeout + 2.0) if hard_timeout is not None else do_call()
+                        else:
+                            def do_call():
+                                return call_litellm_with_param_recovery(
+                                    lambda kwargs: litellm.completion(**kwargs),
+                                    model=model,
+                                    call_kwargs=retry_kwargs,
+                                    model_list=self._config.llm_model_list,
+                                    logger=logger,
+                                )
+                            response = _call_with_hard_timeout(do_call, hard_timeout + 2.0) if hard_timeout is not None else do_call()
+                        parsed = self._parse_litellm_response(response, model)
+                        logger.info(
+                            "[agent.llm] done model=%s provider=%s ms=%s tool_calls=%s content_len=%s",
+                            model,
+                            getattr(parsed, "provider", ""),
+                            int((time.monotonic() - call_started_at) * 1000),
+                            len(getattr(parsed, "tool_calls", []) or []),
+                            len(getattr(parsed, "content", "") or "") if getattr(parsed, "content", None) is not None else None,
+                        )
+                        return parsed
+                    except Exception as fallback_exc:
+                        logger.warning(
+                            "[agent.llm] retry without tools failed model=%s err_type=%s err=%s",
+                            model,
+                            type(fallback_exc).__name__,
+                            fallback_exc,
+                            exc_info=True,
+                        )
+            raise
 
     def _get_temperature(self) -> float:
         """Return the raw configured temperature before per-model normalization."""

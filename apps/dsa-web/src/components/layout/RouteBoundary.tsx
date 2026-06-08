@@ -27,24 +27,52 @@ type RouteErrorBoundaryProps = {
 
 type RouteErrorBoundaryState = {
   hasError: boolean;
+  errorMessage?: string;
+  errorStack?: string;
+  componentStack?: string;
 };
 
 class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, RouteErrorBoundaryState> {
   override state: RouteErrorBoundaryState = {
     hasError: false,
+    errorMessage: undefined,
+    errorStack: undefined,
+    componentStack: undefined,
   };
 
   static getDerivedStateFromError(): RouteErrorBoundaryState {
-    return { hasError: true };
+    return { hasError: true, errorMessage: undefined, errorStack: undefined, componentStack: undefined };
   }
 
   override componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error('Route page failed to render or load', error, errorInfo);
+    const msg = String((error && (error as unknown as { message?: unknown }).message) || error || '');
+    this.setState({
+      errorMessage: msg,
+      errorStack: typeof error?.stack === 'string' ? error.stack : undefined,
+      componentStack: typeof errorInfo?.componentStack === 'string' ? errorInfo.componentStack : undefined,
+    });
+    const isChunkLoadError = /Loading chunk|ChunkLoadError|Failed to fetch dynamically imported module|Importing a module script failed/i.test(
+      msg,
+    );
+    if (!isChunkLoadError) {
+      return;
+    }
+    try {
+      const key = `dsa_route_autoreload:${this.props.resetKey}`;
+      const alreadyReloaded = sessionStorage.getItem(key) === '1';
+      if (!alreadyReloaded) {
+        sessionStorage.setItem(key, '1');
+        window.location.reload();
+      }
+    } catch {
+      // ignore
+    }
   }
 
   override componentDidUpdate(prevProps: RouteErrorBoundaryProps) {
     if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
-      this.setState({ hasError: false });
+      this.setState({ hasError: false, errorMessage: undefined, errorStack: undefined, componentStack: undefined });
     }
   }
 
@@ -66,6 +94,21 @@ class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, RouteErrorBo
           <p className="mt-3 text-sm leading-6 text-secondary-text">
             当前页面资源或组件未能正常加载，可能是网络中断或页面版本已更新。请重新加载页面，或返回首页后再试。
           </p>
+          {this.state.errorMessage ? (
+            <p className="mt-3 rounded-xl border border-border/70 bg-card px-3 py-2 text-left text-xs font-mono text-muted-text">
+              {this.state.errorMessage}
+            </p>
+          ) : null}
+          {this.state.errorStack ? (
+            <p className="mt-3 rounded-xl border border-border/70 bg-card px-3 py-2 text-left text-xs font-mono text-muted-text whitespace-pre-wrap">
+              {this.state.errorStack}
+            </p>
+          ) : null}
+          {this.state.componentStack ? (
+            <p className="mt-3 rounded-xl border border-border/70 bg-card px-3 py-2 text-left text-xs font-mono text-muted-text whitespace-pre-wrap">
+              {this.state.componentStack}
+            </p>
+          ) : null}
           <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-center">
             <button
               type="button"

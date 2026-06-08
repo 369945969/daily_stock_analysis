@@ -406,6 +406,8 @@ def run_agent_loop(
     # enforced from step 2 onwards so the first step always gets a chance
     # even when the total budget is small.
     _MIN_STEP_BUDGET_S = 8.0
+    _DEFAULT_LLM_TIMEOUT_S = float(getattr(llm_adapter, "_config", None).agent_llm_timeout_s) if getattr(getattr(llm_adapter, "_config", None), "agent_llm_timeout_s", None) is not None else 180.0
+    _DEFAULT_TOOL_BATCH_TIMEOUT_S = float(getattr(llm_adapter, "_config", None).agent_tool_timeout_s) if getattr(getattr(llm_adapter, "_config", None), "agent_tool_timeout_s", None) is not None else 120.0
 
     for step in range(max_steps):
         remaining_timeout = _remaining_timeout_seconds(start_time, max_wall_clock_seconds)
@@ -462,10 +464,15 @@ def run_agent_loop(
             progress_callback({"type": "thinking", "step": step + 1, "message": thinking_msg})
 
         # --- LLM call ---
+        effective_llm_timeout = remaining_timeout
+        if effective_llm_timeout is None:
+            effective_llm_timeout = _DEFAULT_LLM_TIMEOUT_S
+        else:
+            effective_llm_timeout = min(float(effective_llm_timeout), _DEFAULT_LLM_TIMEOUT_S)
         response = llm_adapter.call_with_tools(
             messages,
             tool_decls,
-            timeout=remaining_timeout,
+            timeout=effective_llm_timeout,
         )
         provider_used = response.provider
         total_tokens += (response.usage or {}).get("total_tokens", 0)
@@ -522,12 +529,13 @@ def run_agent_loop(
             messages.append(assistant_msg)
 
             # Execute tools (parallel when > 1)
-            effective_tool_timeout = tool_call_timeout_seconds
+            effective_tool_timeout = (
+                _DEFAULT_TOOL_BATCH_TIMEOUT_S
+                if tool_call_timeout_seconds is None
+                else tool_call_timeout_seconds
+            )
             if remaining_timeout is not None:
-                effective_tool_timeout = min(
-                    remaining_timeout,
-                    tool_call_timeout_seconds if tool_call_timeout_seconds and tool_call_timeout_seconds > 0 else remaining_timeout,
-                )
+                effective_tool_timeout = min(float(remaining_timeout), float(effective_tool_timeout))
             tool_results = _execute_tools(
                 response.tool_calls,
                 tool_registry,

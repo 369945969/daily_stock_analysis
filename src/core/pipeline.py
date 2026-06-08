@@ -941,10 +941,17 @@ class StockAnalysisPipeline:
             logger.debug("[%s] Agent history: %d bars in DB, sufficient", code, len(bars))
             return
         try:
+            prefetch_started_at = time.monotonic()
             df, source = self.fetcher_manager.get_daily_data(code, days=min_days)
             if df is not None and not df.empty:
                 self.db.save_daily_data(df, code, source)
                 logger.info("[%s] Prefetched %d rows of history for agent (source: %s)", code, len(df), source)
+            logger.info(
+                "[%s] Agent history prefetch completed (days=%s, ms=%s)",
+                code,
+                min_days,
+                int((time.monotonic() - prefetch_started_at) * 1000),
+            )
         except Exception as e:
             logger.warning("[%s] Agent history prefetch failed: %s", code, e)
 
@@ -974,8 +981,20 @@ class StockAnalysisPipeline:
                 if self.analysis_skills is not None
                 else (getattr(self.config, 'agent_skills', None) or None)
             )
-            # Build executor from shared factory (ToolRegistry and SkillManager prototype are cached)
+            logger.info(
+                "[%s] Agent analysis start (query_id=%s, report_type=%s, skills=%s)",
+                code,
+                query_id,
+                report_type.value,
+                requested_skills,
+            )
+            executor_started_at = time.monotonic()
             executor = build_agent_executor(self.config, requested_skills)
+            logger.info(
+                "[%s] Agent executor built (ms=%s)",
+                code,
+                int((time.monotonic() - executor_started_at) * 1000),
+            )
 
             # Build initial context to avoid redundant tool calls
             initial_context = {
@@ -1014,7 +1033,13 @@ class StockAnalysisPipeline:
                     logger.warning(f"[{code}] Agent mode: social sentiment fetch failed: {e}")
 
             # Issue #1066: ensure deep history is in DB before agent tools run
+            ensure_history_started_at = time.monotonic()
             self._ensure_agent_history(code)
+            logger.info(
+                "[%s] Agent history ensured (ms=%s)",
+                code,
+                int((time.monotonic() - ensure_history_started_at) * 1000),
+            )
 
             market = get_market_for_stock(normalize_stock_code(code))
             (
@@ -1044,7 +1069,16 @@ class StockAnalysisPipeline:
                 message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
             llm_started_at = time.monotonic()
             try:
+                logger.info("[%s] Agent executor.run start (query_id=%s)", code, query_id)
                 agent_result = executor.run(message, context=initial_context)
+                logger.info(
+                    "[%s] Agent executor.run done (ms=%s, ok=%s, provider=%s, model=%s)",
+                    code,
+                    int((time.monotonic() - llm_started_at) * 1000),
+                    getattr(agent_result, "success", False),
+                    getattr(agent_result, "provider", None),
+                    getattr(agent_result, "model", None),
+                )
             except Exception as exc:
                 record_llm_run(
                     success=False,

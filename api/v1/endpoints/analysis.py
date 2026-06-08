@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +90,53 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _SUPPORTED_FREE_TEXT_RE = re.compile(r"^[A-Za-z0-9.*\-+\u3400-\u9fff\s]+$")
+
+# #region debug-point B:analysis-timeout-api
+def _report_analysis_timeout_debug_event(
+    hypothesis_id: str,
+    msg: str,
+    *,
+    data: Optional[Dict[str, Any]] = None,
+    trace_id: Optional[str] = None,
+    run_id: str = "pre",
+) -> None:
+    try:
+        import json as _json
+        import urllib.request as _urllib_request
+
+        env_path = Path(__file__).resolve().parents[3] / ".dbg" / "analysis-timeout.env"
+        url = "http://127.0.0.1:7777/event"
+        session_id = "analysis-timeout"
+        try:
+            content = env_path.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if line.startswith("DEBUG_SERVER_URL="):
+                    url = line.split("=", 1)[1].strip() or url
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    session_id = line.split("=", 1)[1].strip() or session_id
+        except Exception:
+            pass
+
+        payload = {
+            "sessionId": session_id,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "traceId": trace_id,
+            "location": "api.v1.endpoints.analysis",
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+            "ts": int(time.time() * 1000),
+        }
+        req = _urllib_request.Request(
+            url,
+            data=_json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urllib_request.urlopen(req, timeout=0.5).read()
+    except Exception:
+        return
+# #endregion
 
 
 def _get_task_trace_id(task: Any) -> Optional[str]:
@@ -254,6 +302,22 @@ def trigger_analysis(
         HTTPException: 409 - 股票正在分析中
         HTTPException: 500 - 分析失败
     """
+    api_trace_id = uuid.uuid4().hex
+    t0 = time.monotonic()
+    _report_analysis_timeout_debug_event(
+        "B",
+        "trigger_analysis enter",
+        data={
+            "async_mode": bool(getattr(request, "async_mode", False)),
+            "stock_code": getattr(request, "stock_code", None),
+            "stock_codes_count": len(getattr(request, "stock_codes", []) or []),
+            "report_type": getattr(request, "report_type", None),
+            "force_refresh": bool(getattr(request, "force_refresh", False)),
+            "selection_source": getattr(request, "selection_source", None),
+            "has_skills": bool(getattr(request, "skills", None)),
+        },
+        trace_id=api_trace_id,
+    )
     # 校验请求参数
     stock_codes = []
     if request.stock_code:
@@ -272,6 +336,17 @@ def trigger_analysis(
 
     # Normalize and de-duplicate inputs while preserving compatibility.
     resolved = [_resolve_and_normalize_input(c) for c in stock_codes]
+    _report_analysis_timeout_debug_event(
+        "B",
+        "inputs resolved",
+        data={
+            "requested_count": len(stock_codes),
+            "resolved_count": len(resolved),
+            "resolved_sample": resolved[:3],
+            "ms": int((time.monotonic() - t0) * 1000),
+        },
+        trace_id=api_trace_id,
+    )
     
     seen = set()
     unique_codes = []
@@ -319,6 +394,15 @@ def trigger_analysis(
         return _handle_sync_analysis(stock_codes[0], request)
 
     # Async mode submits one task per stock.
+    _report_analysis_timeout_debug_event(
+        "B",
+        "handle async batch",
+        data={
+            "batch_size": len(stock_codes),
+            "ms": int((time.monotonic() - t0) * 1000),
+        },
+        trace_id=api_trace_id,
+    )
     return _handle_async_analysis_batch(stock_codes, request)
 
 
@@ -329,6 +413,19 @@ def _handle_async_analysis_batch(
     """
     Handle asynchronous analysis requests, including batch submission.
     """
+    t0 = time.monotonic()
+    api_trace_id = uuid.uuid4().hex
+    _report_analysis_timeout_debug_event(
+        "B",
+        "_handle_async_analysis_batch enter",
+        data={
+            "batch_size": len(stock_codes),
+            "selection_source": getattr(request, "selection_source", None),
+            "report_type": getattr(request, "report_type", None),
+            "force_refresh": bool(getattr(request, "force_refresh", False)),
+        },
+        trace_id=api_trace_id,
+    )
     task_queue = get_task_queue()
     
     # Preserve metadata for single-stock requests. For batch requests,
@@ -356,6 +453,17 @@ def _handle_async_analysis_batch(
         submit_kwargs["skills"] = skills
 
     accepted_tasks, duplicate_errors = task_queue.submit_tasks_batch(**submit_kwargs)
+    _report_analysis_timeout_debug_event(
+        "B",
+        "task_queue.submit_tasks_batch returned",
+        data={
+            "accepted": len(accepted_tasks),
+            "duplicates": len(duplicate_errors),
+            "accepted_sample": [t.task_id for t in accepted_tasks[:3]],
+            "ms": int((time.monotonic() - t0) * 1000),
+        },
+        trace_id=api_trace_id,
+    )
 
     accepted = [
         BatchTaskAcceptedItem(

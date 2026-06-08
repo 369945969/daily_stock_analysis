@@ -390,7 +390,9 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
                 )
             if file_path.is_file():
                 relative_path = file_path.relative_to(assets_root).as_posix()
-                return await assets_static_files.get_response(relative_path, request.scope)
+                resp = await assets_static_files.get_response(relative_path, request.scope)
+                resp.headers.setdefault("Cache-Control", "no-cache")
+                return resp
             return Response(
                 content="asset not found",
                 status_code=404,

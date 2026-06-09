@@ -35,6 +35,18 @@
 4. 同一个 `session_id` 被重复请求覆盖，旧请求的日志与新请求交错，导致看起来像“卡住”。
    - Not supported by current evidence. 当前日志链路单调连续。
 
+## Fix
+
+- Frontend root cause hypothesis: `apps/dsa-web/src/stores/agentChatStore.ts` 之前会持续等待 HTTP 流真正 EOF，再把 `loading` 置回 `false`；如果浏览器侧连接在收到 `type=done` 后没有立即关闭，就会出现“后端已 done，但前端一直处理中”。
+- Mitigation applied: 收到 `type=done` 后，前端立即停止继续读取并主动 `reader.cancel()`，不再依赖服务端/浏览器何时关闭底层连接。
+- Regression test added: 补充“`done` 已到达但流保持打开”场景，确保前端仍能完成收尾。
+
+## Verification
+
+- `curl -sN` 直连 `/api/v1/agent/chat/stream` 已验证后端会产出完整 `done` 事件，且命令正常退出。
+- `npm run build` in `apps/dsa-web` succeeded; updated static assets emitted to `static/`.
+- `vitest` targeted run currently fails before executing tests because the workspace test environment exposes a non-standard `localStorage` object (`localStorage.getItem is not a function`). This appears unrelated to the chat stream fix itself.
+
 ## Status
 
-- In progress: reading runtime logs only.
+- In progress: fix applied and built; browser-side verification pending refresh/retest.

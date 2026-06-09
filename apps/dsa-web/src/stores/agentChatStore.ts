@@ -269,9 +269,10 @@ export const useAgentChatStore = create<AgentChatState & AgentChatActions>((set,
       const decoder = new TextDecoder();
       let buf = '';
       let finalContent: string | null = null;
+      let streamCompleted = false;
       const currentProgressSteps: ProgressStep[] = [];
-        const processLine = (line: string) => {
-          if (!line.startsWith('data: ')) return;
+      const processLine = (line: string): boolean => {
+          if (!line.startsWith('data: ')) return false;
 
           const event = JSON.parse(line.slice(6)) as ProgressStep;
           if (event.type === 'done') {
@@ -280,18 +281,19 @@ export const useAgentChatStore = create<AgentChatState & AgentChatActions>((set,
               throw getStreamFailureError(doneEvent, '大模型调用出错，请检查 API Key 配置');
             }
             finalContent = doneEvent.content ?? '';
-            return;
+            return true;
           }
 
           if (event.type === 'error') {
             throw getStreamFailureError(event as unknown as StreamFailureEvent, '分析出错');
           }
 
-        currentProgressSteps.push(event);
-        set((s) => ({ progressSteps: [...s.progressSteps, event] }));
+          currentProgressSteps.push(event);
+          set((s) => ({ progressSteps: [...s.progressSteps, event] }));
+          return false;
       };
 
-      while (true) {
+      while (!streamCompleted) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
@@ -300,7 +302,10 @@ export const useAgentChatStore = create<AgentChatState & AgentChatActions>((set,
 
         for (const line of lines) {
           try {
-            processLine(line);
+            if (processLine(line)) {
+              streamCompleted = true;
+              break;
+            }
           } catch (parseErr: unknown) {
             if (isParsedApiError(parseErr) || isApiRequestError(parseErr)) {
               throw parseErr;
@@ -309,14 +314,18 @@ export const useAgentChatStore = create<AgentChatState & AgentChatActions>((set,
         }
       }
 
-      if (buf.trim().startsWith('data: ')) {
+      if (!streamCompleted && buf.trim().startsWith('data: ')) {
         try {
-          processLine(buf.trim());
+          streamCompleted = processLine(buf.trim());
         } catch (parseErr: unknown) {
           if (isParsedApiError(parseErr) || isApiRequestError(parseErr)) {
             throw parseErr;
           }
         }
+      }
+
+      if (streamCompleted && !ac.signal.aborted) {
+        await reader.cancel().catch(() => undefined);
       }
 
       const { sessionId: currentSessionId, currentRoute } = get();

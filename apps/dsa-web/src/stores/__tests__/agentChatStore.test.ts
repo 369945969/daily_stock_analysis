@@ -38,6 +38,23 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+function createOpenEndedStreamResponse(lines: string[], onCancel?: () => void) {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(lines.join('\n')));
+      },
+      cancel() {
+        onCancel?.();
+      },
+    }),
+    {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    },
+  );
+}
+
 beforeEach(() => {
   localStorage.clear();
   useAgentChatStore.setState({
@@ -190,6 +207,38 @@ describe('agentChatStore.startStream', () => {
       message: '分析出错',
       category: 'unknown',
       rawMessage: '分析出错',
+    });
+  });
+
+  it('stops reading once the done event arrives even if the stream stays open', async () => {
+    const cancelDeferred = createDeferred<void>();
+    vi.mocked(agentApi.chatStream).mockResolvedValue(
+      createOpenEndedStreamResponse(
+        ['data: {"type":"done","success":true,"content":"最终分析结果"}'],
+        () => cancelDeferred.resolve(),
+      ),
+    );
+
+    const startPromise = useAgentChatStore
+      .getState()
+      .startStream({ message: '分析茅台', session_id: 'session-test' }, { skillName: '趋势技能' });
+
+    const outcome = await Promise.race([
+      startPromise.then(() => 'resolved'),
+      new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), 100);
+      }),
+    ]);
+
+    expect(outcome).toBe('resolved');
+    await cancelDeferred.promise;
+
+    const state = useAgentChatStore.getState();
+    expect(state.loading).toBe(false);
+    expect(state.messages).toHaveLength(2);
+    expect(state.messages[1]).toMatchObject({
+      role: 'assistant',
+      content: '最终分析结果',
     });
   });
 });

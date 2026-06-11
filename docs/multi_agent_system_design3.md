@@ -1665,3 +1665,485 @@ class ConfigManager:
     ```
   - [ ] **最大步骤数**：4步
   - [ ] **命名规则**：agent_name = "skill_{skill_id}"
+
+
+## 最佳实践建议
+
+### 1. Agent设计原则
+
+- **单一职责**：每个Agent只负责一个分析维度
+  - TechnicalAgent：技术指标分析
+  - IntelAgent：情报与新闻分析
+  - RiskAgent：风险评估
+  - DecisionAgent：决策汇总
+  - SkillAgent：技能评估（动态创建）
+  
+- **明确接口**：清晰定义输入输出
+  - 输入：AgentContext（共享上下文）
+  - 输出：AgentOpinion（结构化意见）
+  - 工具权限：tool_names白名单
+  
+- **容错设计**：优雅处理失败和降级
+  - 工具失败：返回{"error": "...", "retriable": false}
+  - Agent失败：非关键Agent允许跳过
+  - 数据缺失：使用缓存或默认值
+  
+- **可观测性**：记录详细的执行追踪
+  - 每个步骤记录到execution_trace
+  - 工具调用记录到tool_calls_log
+  - 性能指标：duration_s, tokens_used
+
+### 2. 通信设计原则
+
+- **最小共享**：只共享必要的数据
+  - TechnicalAgent输出：trend_result, realtime_quote
+  - IntelAgent输出：news_context, intel_opinion
+  - RiskAgent输出：risk_flags
+  - DecisionAgent输入：所有opinions
+  
+- **结构化输出**：使用AgentOpinion统一格式
+  ```python
+  AgentOpinion(
+      agent_name="technical",
+      signal="buy",
+      confidence=0.85,
+      reasoning="均线多头排列，MACD金叉",
+      key_levels={"support": 1750, "resistance": 1850},
+      raw_data={"trend_score": 85, "ma_alignment": "bullish"}
+  )
+  ```
+  
+- **版本兼容**：meta字段向后兼容
+  - 新增字段不影响旧Agent
+  - 使用Optional类型标注可选字段
+  - 默认值处理缺失字段
+  
+- **数据验证**：验证共享数据的完整性
+  ```python
+  def validate_context(self, ctx: AgentContext) -> None:
+      """验证上下文数据"""
+      if not ctx.stock_code:
+          raise ValueError("stock_code is required")
+      if self.agent_name == "decision" and len(ctx.opinions) < 2:
+          raise ValueError("decision agent requires at least 2 opinions")
+  ```
+
+### 3. 执行流程原则
+
+- **渐进式执行**：按依赖顺序执行Agent
+  - quick模式：Technical → Decision
+  - standard模式：Technical → Intel → Decision
+  - full模式：Technical → Intel → Risk → Decision
+  - specialist模式：Technical → Intel → [SkillAgents] → Decision
+  
+- **超时保护**：设置合理的超时和预算
+  - Pipeline总超时：timeout_seconds（配置）
+  - Agent阶段超时：min_stage_budget_seconds = 15s
+  - 工具调用超时：tool_call_timeout_seconds = 30s
+  - 预算守卫：_MIN_STEP_BUDGET_S = 8s
+  
+- **降级优先**：优先降级而非终止
+  ```python
+  def should_degrade(failed_agent: str, ctx: AgentContext) -> bool:
+      """判断是否降级"""
+      # 关键Agent不降级
+      if failed_agent in ["decision"]:
+          return False
+      # 已有足够数据可降级
+      if len(ctx.opinions) >= 2:
+          return True
+      return False
+  ```
+  
+- **结果验证**：验证最终结果的完整性
+  - DecisionAgent必须输出dashboard JSON
+  - 必需字段：stock_name, sentiment_score, decision_type
+  - 缺失字段使用默认值填充
+
+### 4. 配置管理原则
+
+- **配置驱动**：通过配置控制行为
+  - mode：quick/standard/full/specialist
+  - timeout_seconds：总超时
+  - agent_configs：Agent级配置
+  - skills_requested：激活的技能
+  
+- **环境隔离**：不同环境不同配置
+  - 开发环境：debug=True, timeout=600s
+  - 生产环境：debug=False, timeout=300s
+  - 测试环境：dry_run=True
+  
+- **动态加载**：支持运行时配置更新
+  ```python
+  def reload_config(self) -> None:
+      """重新加载配置"""
+      config = ConfigManager.load_config(self.config_path)
+      self.timeout_seconds = config.timeout_seconds
+      self.agent_configs = config.agent_configs
+  ```
+  
+- **验证机制**：验证配置的有效性
+  ```python
+  def validate_config(config: OrchestratorConfig) -> List[str]:
+      """验证配置"""
+      errors = []
+      if config.timeout_seconds < 60:
+          errors.append("timeout_seconds must >= 60")
+      for agent_name, agent_config in config.agent_configs.items():
+          if agent_config.max_steps < 1:
+              errors.append(f"{agent_name}.max_steps must >= 1")
+      return errors
+  ```
+
+### 5. 监控追踪原则
+
+- **全链路追踪**：记录完整的执行路径
+  ```python
+  ctx.execution_trace = [
+      {"stage": "technical", "action": "start", "timestamp": 123456},
+      {"stage": "technical", "action": "tool_call", "tool": "analyze_trend", "timestamp": 123460},
+      {"stage": "technical", "action": "complete", "status": "completed", "duration_s": 5.2, "timestamp": 123489},
+      {"stage": "intel", "action": "start", "timestamp": 123490},
+      ...
+  ]
+  ```
+  
+- **性能统计**：收集性能指标
+  - total_duration_s：总耗时
+  - agent_duration_s：各Agent耗时
+  - tool_duration_s：各工具耗时
+  - total_tokens：总token消耗
+  - models_used：使用的模型列表
+  
+- **错误分类**：分类统计错误类型
+  - tool_execution_error：工具执行失败
+  - llm_error：LLM调用失败
+  - timeout_error：超时错误
+  - validation_error：验证错误
+  
+- **可视化展示**：提供可视化监控界面
+  - 执行流程图：Agent调用链
+  - 性能热力图：各阶段耗时分布
+  - 错误仪表盘：错误类型统计
+
+---
+
+## 扩展方向
+
+### 1. 动态Agent注册
+
+支持运行时动态注册新Agent，无需修改编排器代码。
+
+```python
+class AgentRegistry:
+    """Agent注册中心"""
+    
+    def __init__(self):
+        self._agents: Dict[str, BaseAgent] = {}
+    
+    def register(self, agent_class: Type[BaseAgent]) -> None:
+        """注册Agent类"""
+        agent = agent_class(tool_registry=self.tool_registry, llm_adapter=self.llm_adapter)
+        self._agents[agent.agent_name] = agent
+    
+    def get(self, name: str) -> Optional[BaseAgent]:
+        """获取Agent实例"""
+        return self._agents.get(name)
+    
+    def build_chain(self, mode: str) -> List[BaseAgent]:
+        """根据mode构建Agent链"""
+        if mode == "quick":
+            return [self._agents["technical"], self._agents["decision"]]
+        elif mode == "standard":
+            return [self._agents["technical"], self._agents["intel"], self._agents["decision"]]
+        ...
+```
+
+### 2. Agent版本管理
+
+支持Agent版本切换和回滚，便于迭代优化。
+
+```python
+class AgentVersionManager:
+    """Agent版本管理器"""
+    
+    def __init__(self):
+        self._versions: Dict[str, Dict[str, BaseAgent]] = {}
+        self._active_versions: Dict[str, str] = {}
+    
+    def register_version(self, agent_name: str, version: str, agent: BaseAgent) -> None:
+        """注册Agent版本"""
+        self._versions.setdefault(agent_name, {})[version] = agent
+    
+    def activate_version(self, agent_name: str, version: str) -> None:
+        """激活指定版本"""
+        self._active_versions[agent_name] = version
+    
+    def rollback(self, agent_name: str) -> None:
+        """回滚到上一个版本"""
+        versions = list(self._versions[agent_name].keys())
+        current = self._active_versions[agent_name]
+        idx = versions.index(current)
+        if idx > 0:
+            self._active_versions[agent_name] = versions[idx - 1]
+```
+
+### 3. 分布式执行
+
+支持Agent分布式执行，提升大规模分析性能。
+
+```python
+class DistributedOrchestrator:
+    """分布式编排器"""
+    
+    def __init__(self, worker_pool: WorkerPool):
+        self.worker_pool = worker_pool
+    
+    def run_parallel(self, tasks: List[Dict[str, Any]]) -> List[OrchestratorResult]:
+        """并行执行多个任务"""
+        futures = [self.worker_pool.submit(self.run, task) for task in tasks]
+        return [future.result() for future in futures]
+    
+    def run_agent_remote(self, agent_name: str, ctx: AgentContext) -> StageResult:
+        """远程执行Agent"""
+        serialized_ctx = self._serialize_context(ctx)
+        result = self.worker_pool.call_agent(agent_name, serialized_ctx)
+        return self._deserialize_result(result)
+```
+
+### 4. Agent市场
+
+构建Agent市场，支持第三方Agent共享和交易。
+
+```python
+class AgentMarket:
+    """Agent市场"""
+    
+    def __init__(self, registry_url: str):
+        self.registry_url = registry_url
+    
+    def search_agents(self, query: str) -> List[AgentMetadata]:
+        """搜索Agent"""
+        response = requests.get(f"{self.registry_url}/search", params={"q": query})
+        return [AgentMetadata(**item) for item in response.json()]
+    
+    def install_agent(self, agent_id: str) -> BaseAgent:
+        """安装Agent"""
+        package = self._download_agent_package(agent_id)
+        agent_class = self._load_agent_class(package)
+        return agent_class()
+    
+    def publish_agent(self, agent: BaseAgent, metadata: AgentMetadata) -> None:
+        """发布Agent"""
+        package = self._package_agent(agent)
+        requests.post(f"{self.registry_url}/publish", json={"metadata": metadata, "package": package})
+```
+
+### 5. AI Agent生成
+
+使用AI自动生成新的Agent实现，降低开发成本。
+
+```python
+class AgentGenerator:
+    """AI Agent生成器"""
+    
+    def __init__(self, llm_adapter: LLMAdapter):
+        self.llm_adapter = llm_adapter
+    
+    def generate_agent(self, spec: AgentSpec) -> BaseAgent:
+        """根据规格生成Agent"""
+        prompt = self._build_generation_prompt(spec)
+        code = self.llm_adapter.call(prompt)
+        agent_class = self._compile_agent_code(code)
+        return agent_class()
+    
+    def _build_generation_prompt(self, spec: AgentSpec) -> str:
+        """构建生成提示词"""
+        return f"""
+        Generate a Python Agent class with the following specification:
+        
+        Agent Name: {spec.name}
+        Description: {spec.description}
+        Tools Required: {spec.tool_names}
+        Max Steps: {spec.max_steps}
+        
+        The Agent must:
+        1. Extend BaseAgent
+        2. Implement system_prompt(ctx)
+        3. Implement build_user_message(ctx)
+        4. Implement post_process(ctx, raw_text) -> AgentOpinion
+        
+        Output only the Python code, no explanations.
+        """
+```
+
+---
+
+## 总结
+
+本设计文档提供了一套完整的、健壮的多Agent系统架构设计方案，参考了 `daily_stock_analysis` 项目的实际实现经验，涵盖了：
+
+1. **核心组件设计**：
+   - AgentOrchestrator（编排器）
+   - BaseAgent（Agent基类）
+   - AgentContext（共享上下文）
+   - AgentOpinion（结构化意见）
+   - StageResult（阶段结果）
+   - ToolRegistry（工具注册中心）
+   - SkillManager（技能管理器）
+   - AgentMemory（记忆系统）
+   - LLMToolAdapter（LLM适配器）
+
+2. **通信机制**：
+   - AgentContext数据传递
+   - AgentOpinion意见聚合
+   - meta元数据传递
+   - 消息格式规范
+
+3. **执行流程**：
+   - ReAct循环
+   - 超时控制
+   - 预算守卫
+   - 降级策略
+   - 并行执行
+
+4. **错误处理**：
+   - 错误分类
+   - 恢复策略
+   - 降级机制
+   - 非重试结果缓存
+
+5. **监控追踪**：
+   - 执行追踪
+   - 性能监控
+   - 进度回调
+   - 可视化展示
+
+6. **配置管理**：
+   - YAML配置
+   - 环境隔离
+   - 动态加载
+   - 验证机制
+
+7. **Agent实现清单**：
+   - 详细职责定义
+   - 工具权限列表
+   - 输出格式JSON Schema
+   - 工作流程步骤
+   - 最大步骤数和超时建议
+
+这套架构可以应用于任何需要多Agent协作的场景，不仅限于股票分析系统。关键设计模式包括：
+
+- **Orchestrator Pattern**：中央协调器管理流水线
+- **Shared Context Pattern**：共享上下文避免Agent间直接依赖
+- **Opinion Aggregation Pattern**：结构化意见聚合决策
+- **Tool Registry Pattern**：统一工具注册和调用
+- **ReAct Loop**：LLM + 工具执行循环
+- **Degradation Strategy**：非关键失败允许降级
+- **Timeout Control**：多级超时和预算守卫
+- **Memory System**：历史性能追踪和置信度校准
+
+---
+
+## 附录
+
+### A. 代码示例
+
+参考 `daily_stock_analysis/src/agent/` 目录下的实际实现代码：
+
+- `orchestrator.py` - 编排器实现
+- `agents/base_agent.py` - Agent基类
+- `agents/technical_agent.py` - 技术分析Agent
+- `agents/intel_agent.py` - 情报Agent
+- `agents/risk_agent.py` - 风险Agent
+- `agents/decision_agent.py` - 决策Agent
+- `protocols.py` - 数据结构定义
+- `factory.py` - 工厂函数
+- `runner.py` - 执行引擎
+- `tools/` - 工具实现
+- `skills/` - 技能系统
+- `memory.py` - 记忆系统
+- `llm_adapter.py` - LLM适配器
+
+### B. 配置示例
+
+参考 `orchestrator_config.yaml` 配置文件示例：
+
+```yaml
+orchestrator:
+  mode: standard
+  timeout_seconds: 600
+  min_stage_budget_seconds: 15
+  
+agents:
+  technical:
+    max_steps: 6
+    timeout_seconds: 300
+    tools:
+      allowed: [get_realtime_quote, analyze_trend, get_chip_distribution]
+  intel:
+    max_steps: 4
+    timeout_seconds: 200
+    tools:
+      allowed: [search_stock_news, search_comprehensive_intel]
+  decision:
+    max_steps: 3
+    timeout_seconds: 300
+    tools: []
+    critical: true
+
+skills:
+  builtin_dir: strategies/
+  custom_dir: custom_skills/
+  default_active: [bull_trend, shrink_pullback]
+  activation_policy: explicit
+```
+
+### C. 使用示例
+
+```python
+# 创建编排器
+from src.agent.factory import build_agent_executor
+
+orchestrator = build_agent_executor(
+    mode="standard",
+    timeout_seconds=600,
+)
+
+# 执行分析
+result = orchestrator.run(
+    task="分析股票600519的投资机会",
+    context={
+        "stock_code": "600519",
+        "stock_name": "贵州茅台",
+        "skills": ["bull_trend", "shrink_pullback"],
+    }
+)
+
+# 处理结果
+if result.success:
+    dashboard = result.dashboard
+    print(f"股票: {dashboard['stock_name']}")
+    print(f"决策: {dashboard['decision_type']}")
+    print(f"情绪评分: {dashboard['sentiment_score']}")
+    print(f"置信度: {dashboard['confidence_level']}")
+    print(f"分析摘要: {dashboard['analysis_summary']}")
+    print(f"风险提示: {dashboard['risk_warning']}")
+else:
+    print(f"分析失败: {result.error}")
+
+# 查看执行统计
+stats = result.stats
+print(f"总耗时: {stats.total_duration_s}秒")
+print(f"总token: {stats.total_tokens}")
+print(f"成功阶段: {stats.completed_stages}/{stats.total_stages}")
+print(f"使用模型: {', '.join(stats.models_used)}")
+```
+
+---
+
+**文档版本**: v2.0
+**创建日期**: 2024-01-15
+**最后更新**: 2024-01-20
+**作者**: AI Agent System Design Team
+**参考项目**: daily_stock_analysis (src/agent/)
